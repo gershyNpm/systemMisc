@@ -18,15 +18,26 @@
   "files": [
     "cmp"
   ],
-  "dependencies": {},
+  "dependencies": {
+    "@gershy/disk": "^0.0.41",
+    "@gershy/lilac": "^0.0.58",
+    "@gershy/lilac-domain": "^0.0.23",
+    "@gershy/lilac-platformer": "^0.0.6",
+    "@gershy/script-bundle": "^0.0.24",
+    "@gershy/util-phrasing": "^0.0.21"
+  },
   "devDependencies": {
+    "@gershy/entry": "^0.0.27",
+    "@gershy/util-jsfn-encode": "^0.0.22",
+    "@skyra/gifenc": "^1.0.1",
     "@types/node": "^24.10.1",
-    "@gershy/entry": "^0.0.27"
+    "canvas": "^3.2.3"
   },
   "peerDependencies": {
     "@gershy/clearing": "^0.0.55"
   },
   "scripts": {
+    "op": "npm run ts.check && npx tsx ./src/main",
     "test": "npm run ts.check && npx tsx ./src/main.test.ts",
     "ts.check": "npx tsc --noEmit"
   },

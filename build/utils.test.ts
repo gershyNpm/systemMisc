@@ -17,6 +17,7 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   
   if (v0 === v1)                      return { equal: true };
   if (v0 == null || v1 == null)       return { equal: false, path, reason: 'identity', v0, v1 };
+  if (v0 !== v0)                      return (v1 !== v1) ? { equal: true } : { equal: false, path, reason: 'identity', v0, v1 };
   
   // Process direct marker symbols
   if (v1 === cmpAny) return { equal: true };
@@ -209,18 +210,28 @@ export const testRunner = async <Inp = null>(inp: TestRunnerInp<Inp>) => {
   // const tot = inp.cases.length;
   await logger.scope('tests', { effort, reg: `/${reg.source}/` }, async logger => {
     
-    let numRan = 0;
+    let numLaunch = 0;
+    let numAccept = 0;
+    let numReject = 0;
     for (const [ n, c ] of cases.entries()) await logger.scope(n.toString(), { name: c.name, effort: c.effort ?? 0 }, async logger => {
       
       if (!reg.test(c.name))        { logger.log({ $$: 'skipped', reg: `/${reg.source}/` }); return; }
       if ((c.effort ?? 0) > effort) { logger.log({ $$: 'skipped', maxEffort: effort });      return; }
       
-      numRan++;
+      numLaunch++;
       await c.fn(logger, testInp);
+      
+      numAccept++;
       
     });
     
-    logger.log({ $$: 'result', invokedTests: numRan, totalTests: cases.length, time: (new Date()).toISOString().split(/[T.]/)[1] });
+    logger.log({ $$: 'result', counts: {
+      total: cases.length,
+      launch: numLaunch,
+      accept: numAccept,
+      reject: numReject,
+      cancel: cases.length - numLaunch
+     }});
     
   });
   
