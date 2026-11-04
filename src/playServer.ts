@@ -135,13 +135,24 @@ export const invokeFn = (async inp => {
   const { utcMs: serverUtcMs, launchData, session, inp: gameInp } = inp;
   
   if (!session) throw Error('session missing');
+  const player = launchData.players.get(session.id);
+  if (!player) return null;
+  
+  if (cl.isCls(gameInp, Object) && gameInp.op === 'state.sync') {
+    player.session.send({
+      op: 'state.sync',
+      state: launchData.timeStep.encode(),
+      pendingEvents: launchData.getPendingEvents()
+    });
+    return null;
+  }
+  
   if (!((v): v is Play.ClientEvent & { op: 'player.key', id: string } => cl.isCls(v, Object) && v.op === 'player.key')(gameInp)) return null;
   
   // All timestamps below are relative to the TimeStep, i.e. to `ticker.startUtcMs`
   const { id, ms: clientMs, ...props } = gameInp;
   
   const clientLatencyToleranceMs = 150;
-  const player = launchData.players.get(session.id)!;
   const serverMs = serverUtcMs - launchData.ticker.startUtcMs;
   const ms = Math.max(Math.min(clientMs, serverMs), serverMs - clientLatencyToleranceMs); // Declared-late events are snapped to the present; declared-early events are tolerated within a certain threshold
   
