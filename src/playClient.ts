@@ -58,7 +58,7 @@ export default async () => {
   // TODO: HEEERE1 hot load works
   // [X] Websocket connection can fail (but maybe the task just timed out??)
   // [X] Work on event/replay multiplayer logic
-  // [ ] Consider esbuild improvement (tolerate node modules when bundling for web; only fail if resolved/tree-shaken bundle still includes them)
+  // [ ] Consider esbuild improvement (tolerate node modules when bundling for web; only fail if final resolved/tree-shaken bundle still includes them - addresses an "undesirable" esbuild feature, which considers it a failure if unbundlable imports are hit, even if they would later be tree-shaken away)
   // [ ] Eliminate references to `global` and `process` where possible - they break sovereignty
   // [ ] Still a lot of todos in Platformer (priority concern: admin-over-non-tls-http)
   

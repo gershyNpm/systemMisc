@@ -29,9 +29,8 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       { op: 'push', item: string },
       { op: 'pop' }
     ][number];
-    type Rel = null;
     
-    return new TimeStep<{}, State, Event, Rel>({
+    return new TimeStep<{}, State, Event, Obj<Json>>({
       registry: {},
       msPerTick: 1000 / 60,
       maxEventsPerSnapshot: 3,
@@ -49,6 +48,41 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         quality: 4,
         find: () => []
       }
+    });
+    
+  };
+  
+  // A ball flies toward a wall (free rel: "hit", timing found by binary search) while fuses
+  // (timed rels: "fuse", exact timing) can kill it
+  const getBallTimeStep = (inp: { vx: number, wall: number, fuses: number[] }) => {
+    
+    type State = { x0: number, t0: number, vx: number, alive: boolean, fuses: number[], log: { ms: number, types: string[] }[] };
+    type Event = { ms: number, op: 'none' };
+    type Rel = { type: 'hit', ms?: undefined } | { type: 'fuse', ms: number };
+    
+    const getX = (state: State, ms: number) => state.x0 + state.vx * (ms - state.t0) * 0.001;
+    
+    return new TimeStep<{}, State, Event, Rel>({
+      registry: {},
+      msPerTick: 10,
+      seed: 0,
+      state: { x0: 0, t0: 0, vx: inp.vx, alive: true, fuses: inp.fuses, log: [] },
+      advance: (state, evt) => {
+        
+        if (!('rels' in evt)) return state;
+        
+        state.log.push({ ms: evt.ms, types: evt.rels.map(r => r.type) });
+        for (const rel of evt.rels) {
+          if (rel.type === 'hit')  Object.assign(state, { x0: Math.min(getX(state, evt.ms), inp.wall), t0: evt.ms, vx: -state.vx });
+          if (rel.type === 'fuse') Object.assign(state, { alive: false, vx: 0, fuses: state.fuses.filter(f => f !== rel.ms) });
+        }
+        return state;
+        
+      },
+      relationCfg: { quality: 4, find: (flow, state) => [
+        ...state.fuses.map(ms => ({ type: 'fuse' as const, ms })),
+        ...(state.alive && getX(state, flow.ms) >= inp.wall ? [ { type: 'hit' as const } ] : [])
+      ]}
     });
     
   };
@@ -130,7 +164,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         };
         type Event = { ms: number } & ({ op: 'add', min: number, max: number } | { op: 'mult', min: number, max: number });
         
-        return new TimeStep<{}, State, Event, null>({
+        return new TimeStep<{}, State, Event, Obj<Json>>({
           registry: {},
           msPerTick: 1,
           maxEventsPerSnapshot: inp.maxEventsPerSnapshot,
@@ -140,7 +174,6 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
             
             if (evt.op === 'add')  state.num += rng.nextInt(evt.min, evt.max);
             if (evt.op === 'mult') state.num *= rng.nextInt(evt.min, evt.max);
-            
             return state;
             
           }
@@ -179,9 +212,85 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       
     }},
     
-    { name: 'random + reorder + being + rel', fn: async logger => {
+    { name: 'timed rel fires at its exact ms', fn: async logger => {
       
-      // TODO
+      const timeStep = getBallTimeStep({ vx: 0, wall: 1000, fuses: [ 25 ] });
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 25, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'timed rels in one tick fire separately, in order', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 0, wall: 1000, fuses: [ 15, 12 ] });
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 12, types: [ 'fuse' ] }, { ms: 15, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'simultaneous timed rels fire together', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 0, wall: 1000, fuses: [ 12, 12 ] })
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 12, types: [ 'fuse', 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'timed rel waits for its window', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 0, wall: 1000, fuses: [ 25 ] });
+      timeStep.tickUpToMs(20);
+      assertEqual(timeStep.getState().log, []);
+      timeStep.tickUpToMs(40);
+      assertEqual(timeStep.getState().log, [ { ms: 25, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'overdue timed rel fires immediately', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 0, wall: 1000, fuses: [ -5 ] });
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 0, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'free rel is hydrated to within precision', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 1000, wall: 33, fuses: [] });
+      timeStep.tickUpToMs(60);
+      
+      const { log, vx } = timeStep.getState();
+      assertEqual(log.length, 1);
+      assertEqual(log[0].types, [ 'hit' ]);
+      assertEqual(log[0].ms >= 33 && log[0].ms <= 33 + 10 / 16, true); // Precise within `1 / (2 ** quality)` ticks
+      assertEqual(vx, -1000);
+      
+    }},
+    
+    { name: 'timed rel before a free rel can prevent it', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 1000, wall: 33, fuses: [ 25 ] });
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 25, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'timed rel in the same tick, before a free rel, fires first', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 1000, wall: 33, fuses: [ 31 ] });
+      timeStep.tickUpToMs(60);
+      assertEqual(timeStep.getState().log, [ { ms: 31, types: [ 'fuse' ] } ]);
+      
+    }},
+    
+    { name: 'timed rel in the same tick, after a free rel, still fires', fn: async logger => {
+      
+      const timeStep = getBallTimeStep({ vx: 1000, wall: 33, fuses: [ 35 ] });
+      timeStep.tickUpToMs(60);
+      
+      const { log } = timeStep.getState();
+      assertEqual(log.map(l => l.types), [ [ 'hit' ], [ 'fuse' ] ]);
+      assertEqual(log[1].ms, 35);
       
     }}
     

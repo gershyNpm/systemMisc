@@ -28,10 +28,18 @@ export namespace Play {
   export type State = {
     world: Registry['World']
   };
+  
+  // Relations that can happen between any two entities
   export type Rel = [
     { type: 'sat', ents: [ string, string ], pen: number, axis: { x: number, y: number } },
-    { type: 'launch', ents: [] }
+    { type: 'waitingRoomLaunch', ents: [] },
+    { type: 'ent', entId: string, ms: number, inp: { type: string } & Obj<Json> }
   ][number];
+  
+  // Subset of `Rel` which are single-entity-specific - generated and advanced by the same entity
+  export type EntityRel = Rel & { type: 'ent', inp: [
+    { type: 'bullet', ms: number }
+  ][number] };
   
   export type Button = never
     | `dir${'L' | 'R' | 'U' | 'D'}`
@@ -178,15 +186,21 @@ export const registry = (() => {
     
     public getRelationGroups(flow: Flow | { ms: number }): readonly Play.RelationGroup[] { return []; }
     
+    public getRelations(flow: Flow | { ms: number }): Play.EntityRel[] {
+      
+      return [];
+      
+    }
+    
+    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRel['inp']) {}
+    
     public renderClip(flow: Flow | { ms: number }, draw: Draw) {}
     
     public getRenderOps(flow: Flow | { ms: number }, draw: Draw): Play.RenderOp[] {
       
-      return [
-        { z: 0, fn: () => {
-          draw.text({ x: 0, y: 0, tur: flow.ms * 0.001, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
-        }}
-      ];
+      return [ { z: 0, fn: () => {
+        draw.text({ x: 0, y: 0, tur: flow.ms * 0.001, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
+      }}];
       
     }
     
@@ -194,19 +208,17 @@ export const registry = (() => {
     
   };
   
-  class World extends Entity {
+  class World extends WireBaseCls {
     
     public static readonly clsName: string = 'World';
     
-    protected state: Entity['state'] & {
-      name: string,
-      stage: Stage
-    };
+    protected state: { name: string, stage: Stage };
     
     constructor(state: World['state']) {
-      super(state);
+      super();
       this.state = state;
     }
+    public encode() { return this.state; }
     
     public getStage(flow: Flow | { ms: number }) { return this.state.stage; }
     public setStage(stage: Stage)                { this.state.stage = stage; }
@@ -224,17 +236,19 @@ export const registry = (() => {
     }
     
   };
-  class Stage extends Entity {
+  class Stage extends WireBaseCls {
     
     public static readonly clsName: string = 'Stage';
     
-    protected state: Entity['state'] & {
+    protected state: {
+      ms: number,
       entities: Obj<Entity>
     };
     constructor(state: Stage['state']) {
-      super(state);
+      super();
       this.state = state;
     }
+    encode() { return this.state; }
     
     public getEntities(flow: Flow | { ms: number }) { return this.state.entities; }
     
@@ -242,16 +256,22 @@ export const registry = (() => {
       
       const ents = this.getEntities(flow);
       const entities = lastRels
-        ? new Set(lastRels[cl.map](rel => rel.ents.map(id => ents[id])).flat(1))
+        ? new Set(lastRels[cl.map](rel => ((rel as { ents?: string[] }).ents ?? []).map(id => ents[id])).flat(1))
         : (function*() { for (const k in ents) yield ents[k] })();
       
       const relGroups: { [K in Play.RelationGroup]?: Entity[] } = {};
+      const rels: Play.Rel[] = [];
       
-      for (const ent of entities)
+      for (const ent of entities) {
+        
+        for (const timeRel of ent.getRelations(flow))
+          if (timeRel.ms >= flow.ms + 1000)
+            rels.push(timeRel);
+        
         for (const group of ent.getRelationGroups(flow))
           (relGroups[group] ??= []).push(ent)
-      
-      const rels: Play.Rel[] = [];
+        
+      }
       
       const { physics = [] } = relGroups;
       (() => {
@@ -350,6 +370,16 @@ export const registry = (() => {
         
         ent0.advanceCollide({ world, flow, entities, rng, phys: ent1 });
         ent1.advanceCollide({ world, flow, entities, rng, phys: ent0 });
+        return;
+        
+      }
+      
+      if (rel.type === 'ent') {
+        
+        const ent = entities[cl.at](rel.entId, null);
+        if (!ent) return;
+        
+        ent.advanceRelation(world, flow, entities, rng, (rel as Play.EntityRel).inp);
         
       }
       
@@ -367,29 +397,23 @@ export const registry = (() => {
         
         const ent = entities[`${Player.clsName}/${evt.session.id}`] as Play.Registry['Player'];
         
-        ent.reanchor<Player['state']>(evt, state => {
-          state.buttons[evt.btn.slice(1) as Play.Button] = evt.btn[0] === '+';
-        });
-        
-        if (evt.btn === '+act0') {
-          
-          const entTfm = ent.getTransform(evt);
-          const bulletId = `${Bullet.clsName}/${rng.nextFlt().toString(36).slice(2)}`;
-          entities[bulletId] = new Bullet({
-            id: bulletId,
-            ms: evt.ms,
-            anchorMs: evt.ms,
-            pos: entTfm.pos.add(Pt.polar({ tur: entTfm.tur, mag: 0.5 })),
-            tur: entTfm.tur,
-            vel: 10
-          });
-          
-        }
-        
+        const btn = evt.btn.slice(1) as Play.Button;
+        const act = evt.btn[0] === '+';
+        ent.advanceButton(evt, rng, btn, act);
         
       }
       
       return entities;
+      
+    }
+    
+    public renderClip(flow: Flow | { ms: number }, draw: Draw) {}
+    
+    public getRenderOps(flow: Flow | { ms: number }, draw: Draw): Play.RenderOp[] {
+      
+      return [ { z: 0, fn: () => {
+        draw.text({ x: 0, y: 0, tur: flow.ms * 0.001, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
+      }}];
       
     }
     
@@ -465,7 +489,7 @@ export const registry = (() => {
       
       const { fulfilledMs, delayLaunchMs }  = this.state.players;
       if (flow.ms > (fulfilledMs ?? Infinity) + delayLaunchMs)
-        r.rels.push({ type: 'launch', ents: [] })
+        r.rels.push({ type: 'waitingRoomLaunch', ents: [] })
       
       return r;
       
@@ -475,7 +499,7 @@ export const registry = (() => {
       
       super.advanceRelation(world, flow, entities, rng, rel);
        
-      if (rel.type === 'launch') {
+      if (rel.type === 'waitingRoomLaunch') {
         
         this.state.players.fulfilledMs = null;
         this.state.players.required += 100;
@@ -512,7 +536,9 @@ export const registry = (() => {
           anchorMs: evt.ms,
           pos: Pt.polar({ tur, mag: 15 }),
           tur: tur + 0.5,
-          buttons: ([ 'dirL', 'dirR', 'dirU', 'dirD', 'turL1', 'turL2', 'turR1', 'turR2', 'mod0', 'act0', 'act1', 'act2', 'act3', 'act4', 'act5', 'act6' ] as const)[cl.toObj](v => [ v, false ])
+          buttons: ([ 'dirL', 'dirR', 'dirU', 'dirD', 'turL1', 'turL2', 'turR1', 'turR2', 'mod0', 'act0', 'act1', 'act2', 'act3', 'act4', 'act5', 'act6' ] as const)[cl.toObj](v => [ v, false ]),
+          shootMs: null,
+          bulletRearmMs: 0
         });
         
         if (this.state.players.total === this.state.players.required) this.state.players.fulfilledMs = evt.ms;
@@ -767,7 +793,9 @@ export const registry = (() => {
     
     protected state: Physical['state'] & {
       name: string,
-      buttons: { [K in Play.Button]: boolean }
+      buttons: { [K in Play.Button]: boolean },
+      shootMs: null | number,
+      bulletRearmMs: number
     };
     constructor(state: Player['state']) {
       super(state);
@@ -792,7 +820,7 @@ export const registry = (() => {
         // Aiming prevents moving or separate turning
         const aimTur = +buttons.turR2 - +buttons.turL2;
         if (aimTur) {
-          forces.push({ ms: this.state.anchorMs, durMs: null, type: 'turAcl', amt: aimTur * 0.053, flatSc: 2 });
+          forces.push({ ms: this.state.anchorMs, durMs: null, type: 'turAcl', amt: aimTur * 0.06, flatSc: 2 });
           return;
         }
         
@@ -809,9 +837,9 @@ export const registry = (() => {
           :                                                        1;
         
         // Direction of movement based on facing direction and buttons
-        const vertPol = +this.state.buttons.dirU - 1.0 * +this.state.buttons.dirD;
-        const horzPol = +this.state.buttons.dirR - 1.0 * +this.state.buttons.dirL;
-        const walkVel = new Pt({ x: vertPol, y: horzPol })
+        const walkPol = +this.state.buttons.dirU - +this.state.buttons.dirD; // "walk"
+        const strfPol = +this.state.buttons.dirR - +this.state.buttons.dirL; // "strafe"
+        const walkVel = new Pt({ x: walkPol, y: strfPol })
           .norm()                       // fixed-length
           .mult(posSpeed * walkVelMult) // apply walk vel mult
           .addTur(this.state.tur);      // Align with rotation
@@ -825,7 +853,9 @@ export const registry = (() => {
             const circum = secsPerTurn * walkVelLen;
             const r = circum / (2 * Math.PI);
             const initAng = this.state.tur - tur * 0.25; // Quarter turn offset in the direction of turning
-            forces.push({ ms: this.state.anchorMs, durMs: null, type: 'arc', r, initAng, vel: tur * vertPol * turSpeed });
+            
+            // TODO: this seems buggy for anything other than pure forward motion
+            forces.push({ ms: this.state.anchorMs, durMs: null, type: 'arc', r, initAng, vel: tur * walkPol * turSpeed });
             
           } else {
             
@@ -847,6 +877,62 @@ export const registry = (() => {
     
     public getRelationGroups(flow: Flow | { ms: number }): Play.RelationGroup[] {
       return [ ...super.getRelationGroups(flow), 'player' ];
+    }
+    
+    public advanceButton(flow: Flow | { ms: number }, rng: Rng, button: Play.Button, act: boolean) {
+      
+      this.reanchor<Player['state']>(flow, state => {
+        
+        state.buttons[button] = act;
+        if (button === 'act0') this.state.shootMs = act ? flow.ms : null;
+        
+      });
+      
+    }
+    
+    public getRelations(flow: Flow | { ms: number; }): Play.EntityRel[] {
+      
+      const rels: Play.EntityRel[] = [];
+      
+      if (this.state.shootMs) {
+        
+        const msPerBullet = 150;
+        const firstBulletMs = Math.max(this.state.shootMs, this.state.bulletRearmMs);
+        for (let ms = firstBulletMs; ms <= flow.ms; ms += msPerBullet) {
+          rels.push({ type: 'ent', entId: this.state.id, ms: flow.ms, inp: {
+            type: 'bullet',
+            ms: flow.ms
+          }});
+        }
+        
+      }
+      
+      return rels;
+      
+    }
+    
+    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRel['inp']): void {
+      
+      if (rel.type === 'bullet') {
+        
+        const msPerBullet = 150;
+        
+        const bulletId = `${Bullet.clsName}/${rng.nextFlt().toString(36).slice(2)}`
+        const tfm = this.getTransform({ ms: rel.ms });
+        
+        entities[bulletId] = new Bullet({
+          id: bulletId,
+          ms: rel.ms,
+          anchorMs: rel.ms,
+          pos: tfm.pos.add(Pt.polar({ tur: tfm.tur, mag: 0.5 })),
+          tur: tfm.tur,
+          vel: 10
+        });
+        
+        this.state.bulletRearmMs = Math.max(this.state.bulletRearmMs, rel.ms + msPerBullet);
+        
+      }
+      
     }
     
     public getBound() { return Player.bound; }
@@ -872,18 +958,17 @@ export const registry = (() => {
           lineW: 0.1
         });
         
-        const textPos = tfm.pos.add(Pt.polar({ tur: tfm.tur + 0.5, mag: 1.5 }));
+        const textPos = tfm.pos.add(Pt.polar({ tur: tfm.tur + 0.5, mag: 1 }));
         draw.text({
           text: this.state.name,
           x: textPos.x,
           y: textPos.y,
           tur: tfm.tur + 0.25,
-          fontSize: 1,
+          fontSize: 0.6,
           fill: `${colour}8`
         });
         
       }}];
-      
       
     }
     
@@ -928,7 +1013,9 @@ export const registry = (() => {
     public getRenderOps(flow: Flow | { ms: number }, draw: Draw, tfm = this.getTransform(flow)) {
       
       return [ { z: 0, fn: () => {
+        
         this.getBound(flow).render(tfm, draw, { fill: this.getColour(flow) });
+        
       }}];
       
     }
@@ -984,7 +1071,6 @@ export default (signals?: TimeStepInp<any, any, any, any>['signals']) => {
     maxSnapshotsToStore: 50,
     
     state: { world: new World({
-      ms: 0,
       name: 'zombies',
       stage: WaitingRoom.fromInitialState({ ms: 0, players: { total: 0, required: 3, fulfilledMs: null, delayLaunchMs: 1000 * 10 } })
     }) },
