@@ -1,6 +1,9 @@
-export default (fpsc: number, tick: (inp: { tick: number, ms: number, sc: number }) => any) => {
+export default (hz: number, tick: (inp: { tick: number, ms: number, sc: number }) => any) => {
   
-  const mspf = 1000 / fpsc;
+  // Call a function at a consistent frequency - accounts for the time the function takes to
+  // resolve - watch out for calling heavy functions too often!
+  
+  const mspf = 1000 / hz;
   const startUtcMs = Date.now();
   const compensationMs = 1;
   
@@ -10,7 +13,7 @@ export default (fpsc: number, tick: (inp: { tick: number, ms: number, sc: number
   const err = Error('');
   (async () => {
     
-    await Promise.resolve(); // Wait a microtick before starting...
+    await null; // Wait a microtick before starting...
     
     while (active) {
       

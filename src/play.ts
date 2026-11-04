@@ -2,8 +2,11 @@ import type { Draw, Look } from './util/draw.ts';
 import { Pt } from './util/pt.ts';
 import type { Rng } from './util/rng.ts';
 import ticker from './util/ticker.ts';
-import { TimeStep, type Flow, type TimeStepInp } from './util/timeStep/main.ts';
+import { TimeStep } from './util/timeStep/main.ts';
 import { BaseCls as WireBaseCls, type Registry as WireRegistry } from './util/wire/main.ts';
+
+// TODO
+// - Consider switching everything from `Date.now()` to `performance.now()`
 
 export namespace Play {
   
@@ -12,7 +15,7 @@ export namespace Play {
     // Pos
     { type: 'vel', x: number, y: number },
     { type: 'acl', x: number, y: number },
-    { type: 'arc', r: number, initAng: number, vel: number },
+    { type: 'arc', r: number, initTur: number, vel: number },
     
     // Ang
     { type: 'turVel', amt: number },
@@ -31,15 +34,26 @@ export namespace Play {
   
   // Relations that can happen between any two entities
   export type Rel = [
+    
+    // Stage rels
+    { type: 'waitingRoomLaunch',  ms: number },
+    { type: 'plungeSpin',         ms: number },
+    { type: 'plungeOpen',         ms: number },
+    { type: 'plungeShut'                     },
+    
     { type: 'sat', ents: [ string, string ], pen: number, axis: { x: number, y: number } },
-    { type: 'waitingRoomLaunch', ents: [] },
+    
     { type: 'ent', entId: string, ms: number, inp: { type: string } & Obj<Json> }
+    
   ][number];
   
   // Subset of `Rel` which are single-entity-specific - generated and advanced by the same entity
   export type EntityRel = Rel & { type: 'ent', inp: [
-    { type: 'bullet', ms: number }
+    { type: 'bullet' },
+    { type: 'zombiePlan' }
   ][number] };
+  
+  export type EntityRelInp = EntityRel['inp'] & { ms: number };
   
   export type Button = never
     | `dir${'L' | 'R' | 'U' | 'D'}`
@@ -53,33 +67,72 @@ export namespace Play {
     { ms: number, op: 'player.key',     btn: `${'+' | '-'}${Button}` }
   ][number];
   
-  export type RenderOp = { z: number, fn: () => void };
-  
   export type Event = ClientEvent & { session: { id: string } };
-  export type AckEvent = Event & { ack?: { id: string, clientUtcMs: number, serverUtcMs: number, resolvedUtcMs: number } };
+  export type AckEvent = Event & { ack?: { id: string, clientMs: number, serverMs: number, resolvedMs: number } };
+  
+  export type RenderOp = { z: number, fn: () => void };
   
   export type ClsRegistry = typeof registry;
   export type Registry = { [K in keyof ClsRegistry]: InstanceType<ClsRegistry[K]> };
   
+  export type Tfm = { pos: Pt, tur: number };
+  
 };
 
-type Tfm = { pos: Pt, tur: number };
+// Utils
+export class Flow {
+  
+  // Note: never sent over wire - simply a utility class instantiated by `World`!
+  
+  readonly ms: number;
+  readonly sc: number;
+  readonly stats: { hit: number, miss: number };
+  protected cache: Map<string, any>;
+  constructor(ms: number) {
+    this.ms = ms;
+    this.sc = ms * 0.001;
+    this.cache = new Map();
+    this.stats = { hit: 0, miss: 0 };
+  }
+  
+  cached<V>(key: string, fn: () => V): V {
+    
+    const hit = this.cache.get(key);
+    if (hit !== cl.skip) { this.stats.hit++; return hit; }
+    
+    const miss = fn();
+    this.cache.set(key, miss);
+    this.stats.miss++;
+    return miss;
+    
+  }
+  
+  cacheInvalidate(key: string) { this.cache.delete(key); }
+  
+  jumpTo(ms: number) { return new Flow(ms); }
+  
+};
+
 export const registry = (() => {
   
+  const debuggg = true;
+  
+  // Geometry
   abstract class Bound extends WireBaseCls {
     
-    public static readonly clsName: string = 'Bound';
+    static readonly clsName: string = 'Bound';
     
     abstract axes():  Pt[];
     abstract proj(normAxis: Pt): readonly [ number, number ]; // Note the projection interval is ordered, i.e. `interval[0] <= interval[1]`
-    abstract render(tfm: Tfm, draw: Draw, look: Look);
+    abstract render(tfm: Play.Tfm, draw: Draw, look: Look): void;
+    abstract boundingRadius(): number;
     
   };
   class CircleBound extends Bound {
     
-    public static readonly clsName: string = 'CircleBound';
+    static readonly clsName: string = 'CircleBound';
     
-    protected r: number;
+    r: number;
     constructor(inp: { r: number }) {
       super();
       this.r = inp.r;
@@ -88,17 +141,18 @@ export const registry = (() => {
     
     axes()             { return []; }
     proj(normAxis: Pt) { return [ -this.r, +this.r ] as const; }
-    render(tfm: Tfm, draw: Draw, look: Look) {
+    render(tfm: Play.Tfm, draw: Draw, look: Look) {
       draw.circle({ ...tfm, r: this.r, ...look });
     }
+    boundingRadius() { return this.r; }
     
   };
   class RectBound extends Bound {
     
-    public static readonly clsName: string = 'RectBound';
+    static readonly clsName: string = 'RectBound';
     
-    protected w: number;
-    protected h: number;
+    w: number;
+    h: number;
     constructor(inp: { w: number, h: number }) {
       super();
       this.w = inp.w;
@@ -117,16 +171,17 @@ export const registry = (() => {
         new Pt({ x: -hw, y: +hh })
       ]);
     }
-    render(tfm: Tfm, draw: Draw, look: Look) {
+    render(tfm: Play.Tfm, draw: Draw, look: Look) {
       draw.rect({ ...tfm, w: this.w, h: this.h, ...look });
     }
+    boundingRadius() { return Math.hypot(this.w * 0.5, this.h * 0.5); }
     
   };
   class PolygonBound extends Bound {
     
-    public static readonly clsName: string = 'PolygonBound';
+    static readonly clsName: string = 'PolygonBound';
     
-    public static project(normAxis: Pt, pts: Pt[]) {
+    static project(normAxis: Pt, pts: Pt[]) {
       
       let min = Infinity;
       let max = -Infinity;
@@ -140,12 +195,12 @@ export const registry = (() => {
       
     }
     
-    protected cornersRh: Pt[]; // "right-handed"
-    protected cache: { axes: null | Pt[] };
+    cornersRh: Pt[]; // "right-handed"
+    protected cache: { axes: null | Pt[], boundingRadius: null | number };
     constructor(inp: { cornersRh: Pt[] }) {
       super();
       this.cornersRh = inp.cornersRh;
-      this.cache = { axes: null };
+      this.cache = { axes: null, boundingRadius: null };
     }
     encode() { return { cornersRh: this.cornersRh }; }
     
@@ -162,7 +217,7 @@ export const registry = (() => {
       
     })(); }
     proj(normAxis: Pt) { return PolygonBound.project(normAxis, this.cornersRh); }
-    render(tfm: Tfm, draw: Draw, look: Look) {
+    render(tfm: Play.Tfm, draw: Draw, look: Look) {
       
       draw.polygon({
         pts: Pt.rotate(this.cornersRh, tfm.tur).map(pt => pt.add(tfm.pos)),
@@ -170,12 +225,19 @@ export const registry = (() => {
       });
       
     }
+    boundingRadius() { return this.cache.boundingRadius ??= (() => {
+      
+      let max = 0;
+      for (const pt of this.cornersRh) max = Math.max(max, pt.len());
+      return max;
+      
+    })(); }
     
   };
   
   class Entity extends WireBaseCls {
     
-    public static readonly clsName: string = 'Entity';
+    static readonly clsName: string = 'Entity';
     
     protected state: { ms: number };
     
@@ -184,22 +246,18 @@ export const registry = (() => {
       this.state = state;
     }
     
-    public getRelationGroups(flow: Flow | { ms: number }): readonly Play.RelationGroup[] { return []; }
+    getRelationGroups(flow: Flow): readonly Play.RelationGroup[] { return []; }
     
-    public getRelations(flow: Flow | { ms: number }): Play.EntityRel[] {
-      
-      return [];
-      
-    }
+    getRelations(flow: Flow): Play.EntityRel[] { return []; }
     
-    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRel['inp']) {}
+    advanceRelation(flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRelInp) {}
     
-    public renderClip(flow: Flow | { ms: number }, draw: Draw) {}
+    renderClip(flow: Flow, draw: Draw) {}
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw): Play.RenderOp[] {
+    getRenderOps(flow: Flow, draw: Draw): Play.RenderOp[] {
       
       return [ { z: 0, fn: () => {
-        draw.text({ x: 0, y: 0, tur: flow.ms * 0.001, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
+        draw.text({ x: 0, y: 0, tur: flow.sc, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
       }}];
       
     }
@@ -210,7 +268,7 @@ export const registry = (() => {
   
   class World extends WireBaseCls {
     
-    public static readonly clsName: string = 'World';
+    static readonly clsName: string = 'World';
     
     protected state: { name: string, stage: Stage };
     
@@ -218,27 +276,56 @@ export const registry = (() => {
       super();
       this.state = state;
     }
-    public encode() { return this.state; }
+    encode() { return this.state; }
     
-    public getStage(flow: Flow | { ms: number }) { return this.state.stage; }
-    public setStage(stage: Stage)                { this.state.stage = stage; }
+    getStage(flow: Flow)   { return this.state.stage; }
+    setStage(stage: Stage) { this.state.stage = stage; }
     
-    public getRelations(flow: Flow | { ms: number }, lastRels: null | Play.Rel[]): Play.Rel[] {
+    getRelations(flow: Flow, lastRels: null | Play.Rel[]): Play.Rel[] {
       
       return this.getStage(flow).getRelations(flow, lastRels).rels;
       
     }
     
-    public advance(rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
+    dispatchAdvanceEvent(rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
       
-      this.getStage(evt).advance(this, rng, evt);
+      const flow = new Flow(evt.ms);
+      this.getStage(flow).dispatchAdvanceEvent(flow, this, rng, evt);
       
     }
     
   };
   class Stage extends WireBaseCls {
     
-    public static readonly clsName: string = 'Stage';
+    static readonly clsName: string = 'Stage';
+    
+    static wall = (inp: { flow: Flow, id?: string, w: number, pt0: Pt, pt1: Pt }) => {
+      
+      const { flow, id = null, w, pt0, pt1 } = inp;
+      const mid = pt0.add(pt1).mult(0.5);
+      
+      return Obstacle.fromInitialState({
+        flow,
+        id,
+        bound: new RectBound({ w: pt1.sub(pt0).len(), h: w }),
+        pos: mid,
+        tur: pt0.getTur(pt1)
+      });
+      
+    };
+    
+    static airlock = (inp: { flow: Flow, num: number, r?: number, pos: Pt, tur: number }) => (5)[cl.toArr](n => {
+      
+      const { flow, num, r = 15, pos, tur } = inp;
+      return Stage.wall({
+        flow,
+        id: `${Obstacle.clsName}/airlock${num}/${n}`,
+        w: 3,
+        pt0: pos.add(Pt.polar({ tur: tur + (n / 5) + (1 / 5) * -0.5, mag: r })),
+        pt1: pos.add(Pt.polar({ tur: tur + (n / 5) + (1 / 5) * +0.5, mag: r }))
+      });
+      
+    });
     
     protected state: {
       ms: number,
@@ -250,9 +337,9 @@ export const registry = (() => {
     }
     encode() { return this.state; }
     
-    public getEntities(flow: Flow | { ms: number }) { return this.state.entities; }
+    getEntities(flow: Flow) { return this.state.entities; }
     
-    public getRelations(flow: Flow | { ms: number }, lastRels: null | Play.Rel[]) {
+    getRelations(flow: Flow, lastRels: null | Play.Rel[]) {
       
       const ents = this.getEntities(flow);
       const entities = lastRels
@@ -264,8 +351,10 @@ export const registry = (() => {
       
       for (const ent of entities) {
         
+        // Ignore time rels that are too far in the future to be processed here
         for (const timeRel of ent.getRelations(flow))
-          rels.push(timeRel);
+          if (timeRel.ms < flow.ms + 3 * 1000)
+            rels.push(timeRel);
         
         for (const group of ent.getRelationGroups(flow))
           (relGroups[group] ??= []).push(ent)
@@ -278,8 +367,8 @@ export const registry = (() => {
         const len = physics.length;
         for (let i = 1; i < len; i++) { for (let j = 0; j < i; j++) {
           
-          const phys0 = physics[i] as Play.Registry['Physical'];
-          const phys1 = physics[j] as Play.Registry['Physical'];
+          const phys0 = physics[i] as Physical;
+          const phys1 = physics[j] as Physical;
           
           if (!phys0.canCollide(phys1) || !phys1.canCollide(phys0)) continue;
           
@@ -342,11 +431,11 @@ export const registry = (() => {
       
     }
     
-    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.Rel) {
+    dispatchAdvanceRelations(world: World, flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.Rel) {
       
       if (rel.type === 'sat') {
         
-        const [ ent0, ent1 ] = rel.ents.map(id => entities[cl.at](id, null) as null | Play.Registry['Physical']); // I'm preeetty sure that if `relationCfg.find` saw an entity id, that id is guaranteed to exist when we process the timeStep.rel event here...
+        const [ ent0, ent1 ] = rel.ents.map(id => entities[cl.at](id, null) as null | Physical); // I'm preeetty sure that if `relationCfg.find` saw an entity id, that id is guaranteed to exist when we process the timeStep.rel event here...
         if (!ent0 || !ent1) return;
         
         const axis = new Pt(rel.axis);
@@ -378,19 +467,19 @@ export const registry = (() => {
         const ent = entities[cl.at](rel.entId, null);
         if (!ent) return;
         
-        ent.advanceRelation(world, flow, entities, rng, (rel as Play.EntityRel).inp);
+        ent.advanceRelation(flow, entities, rng, { ms: rel.ms, ...(rel as Play.EntityRel).inp });
         
       }
       
     }
     
-    public advance(world: World, rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
+    dispatchAdvanceEvent(flow: Flow, world: World, rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
       
-      const entities = this.getEntities(evt);
+      const entities = this.getEntities(flow);
       
       if (evt.op === 'timeStep.rel')
         for (const rel of evt.rels)
-          this.advanceRelation(world, evt, entities, rng, rel);
+          this.dispatchAdvanceRelations(world, flow, entities, rng, rel);
       
       if (evt.op === 'player.key' && entities[cl.has](`${Player.clsName}/${evt.session.id}`)) {
         
@@ -398,7 +487,7 @@ export const registry = (() => {
         
         const btn = evt.btn.slice(1) as Play.Button;
         const act = evt.btn[0] === '+';
-        ent.advanceButton(evt, rng, btn, act);
+        ent.advanceButton(flow, rng, btn, act);
         
       }
       
@@ -406,12 +495,12 @@ export const registry = (() => {
       
     }
     
-    public renderClip(flow: Flow | { ms: number }, draw: Draw) {}
+    renderClip(flow: Flow, draw: Draw) {}
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw): Play.RenderOp[] {
+    getRenderOps(flow: Flow, draw: Draw): Play.RenderOp[] {
       
       return [ { z: 0, fn: () => {
-        draw.text({ x: 0, y: 0, tur: flow.ms * 0.001, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
+        draw.text({ x: 0, y: 0, tur: flow.sc, text: (this as any).constructor.clsName, fontSize: 1, fill: '#f00' })
       }}];
       
     }
@@ -419,59 +508,41 @@ export const registry = (() => {
   };
   class WaitingRoom extends Stage {
     
-    public static readonly clsName: string = 'WaitingRoom';
+    static readonly clsName: string = 'WaitingRoom';
     
-    public static fromInitialState(state: Omit<WaitingRoom['state'], 'entities'>) {
+    static fromInitialState(inp: { flow: Flow, players: { required: number } }) {
       
-      const wallBound = new PolygonBound({ cornersRh: [
-        new Pt({ x: +2, y:   0 }),
-        new Pt({ x: -1, y: +50 }),
-        new Pt({ x: -1, y: -50 }),
-      ]});
       const mysteryBound = new PolygonBound({
-        cornersRh: (3)[cl.toArr](v => Pt.polar({ tur: v / 3, mag: 10 }))
+        cornersRh: (3)[cl.toArr](v => Pt.polar({ tur: v / 3, mag: 8 }))
       });
       
+      const { flow } = inp;
       return new WaitingRoom({
-        ...state,
-        entities: {
+        ms: flow.ms,
+        players: { total: 0, required: inp.players.required, fulfilledMs: null, delayLaunchMs: debuggg ? 500 : 1000 * 10 },
+        entities: [
           
-          ...(5)[cl.toObj](v => {
-            
-            const id = `${Obstacle.clsName}/wall${v}`;
-            return [ id, new Obstacle({
-              id,
-              ms: 0,
-              anchorMs: 0,
-              pos: Pt.polar({ tur: v / 5, mag: 30 }),
-              tur: v / 5,
-              bound: wallBound,
-              forces: []
-            })];
-            
-          }),
+          ...Stage.airlock({ flow, num: 0, pos: new Pt(), tur: 0 }),
           
-          [`${Obstacle.clsName}/mystery0`]: new Obstacle({
+          Obstacle.fromInitialState({
+            flow,
             id: `${Obstacle.clsName}/mystery0`,
-            ms: 0,
-            anchorMs: 0,
             pos: new Pt(),
             tur: 0,
             bound: mysteryBound,
             forces: [ { ms: 0, durMs: null, type: 'turVel', amt: 0.06 } ]
           }),
           
-          [`${Obstacle.clsName}/mystery1`]: new Obstacle({
+          Obstacle.fromInitialState({
+            flow,
             id: `${Obstacle.clsName}/mystery1`,
-            ms: 0,
-            anchorMs: 0,
             pos: new Pt(),
             tur: 0,
             bound: mysteryBound,
             forces: [ { ms: 0, durMs: null, type: 'turVel', amt: -0.06 } ]
           }),
           
-        }
+        ][cl.toObj](obs => [ obs.getId(), obs ])
       });
       
     }
@@ -482,46 +553,77 @@ export const registry = (() => {
     
     constructor(state: WaitingRoom['state']) { super(state); this.state = state; }
     
-    public getRelations(flow: Flow | { ms: number }, lastRels: null | Play.Rel[]) {
+    getRelations(flow: Flow, lastRels: null | Play.Rel[]) {
       
       const r = super.getRelations(flow, lastRels);
       
-      const { fulfilledMs, delayLaunchMs }  = this.state.players;
-      if (flow.ms > (fulfilledMs ?? Infinity) + delayLaunchMs)
-        r.rels.push({ type: 'waitingRoomLaunch', ents: [] })
+      const { fulfilledMs, delayLaunchMs } = this.state.players;
+      if (fulfilledMs)
+        r.rels.push({ ms: fulfilledMs + delayLaunchMs, type: 'waitingRoomLaunch' })
       
       return r;
       
     }
     
-    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.Rel) {
+    dispatchAdvanceRelations(world: World, flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.Rel) {
       
-      super.advanceRelation(world, flow, entities, rng, rel);
+      super.dispatchAdvanceRelations(world, flow, entities, rng, rel);
        
       if (rel.type === 'waitingRoomLaunch') {
         
         this.state.players.fulfilledMs = null;
         this.state.players.required += 100;
         
-        const [ , wall1 ] = this.state.entities[cl.find](v => cl.isCls(v, Obstacle)) as [ string, Obstacle ];
+        const entities = { ...this.state.entities };
+        delete entities[`${Obstacle.clsName}/wall0`]; // Delete the wall with angle 0
         
-        // Open up a wall...
-        wall1.reanchor<Obstacle['state']>(flow, state => {
-          state.forces.push({ ms: flow.ms, durMs: 5000, type: 'vel', ...state.pos.norm().mult(1.5).encode() });
-        });
+        const addEnts = [
+          
+          Obstacle.fromInitialState({
+            flow,
+            id: `${Obstacle.clsName}/plungeWall0`,
+            pos: new Pt({ x: 30, y: -7 }),
+            tur: 0,
+            bound: new RectBound({ w: 30, h: 4 })
+          }),
+          Obstacle.fromInitialState({
+            flow,
+            id: `${Obstacle.clsName}/plungeWall1`,
+            pos: new Pt({ x: 30, y: +7 }),
+            tur: 0,
+            bound: new RectBound({ w: 30, h: 4 })
+          }),
+          
+          ...(10)[cl.toArr](n => new Zombie({
+            ms: flow.ms,
+            id: `${Zombie.clsName}/plungeZombie${n}`,
+            anchorMs: flow.ms,
+            pos: new Pt({ x: 30, y: 0 }).add(Pt.polar({ tur: rng.nextFlt(), mag: rng.nextFlt() * 4 })),
+            tur: rng.nextFlt(),
+            nextPlanMs: flow.ms + 5 * 1000,
+            plan: { type: 'bored', ms: flow.ms, dir: rng.elem([ 'lh', 'rh' ] as const)! }
+          }))
+          
+        ];
         
-        world.setStage(new Plunge({
-          ms: flow.ms,
-          entities: this.state.entities
+        for (const ent of addEnts) entities[ent.getId()] = ent;
+        
+        world.setStage(Plunge.fromInitialState({
+          flow,
+          rng,
+          level: 0,
+          players: entities[cl.map](v => cl.inCls(v, Player) ? v : cl.skip),
+          airlockPos: new Pt({ x: 0, y: 0 }),
+          airlockTur: 0
         }));
         
       }
       
     }
     
-    public advance(world: World, rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
+    dispatchAdvanceEvent(flow: Flow, world: World, rng: Rng, evt: Play.Event | { ms: number, op: 'timeStep.rel', rels: Play.Rel[] }) {
       
-      const entities = super.advance(world, rng, evt);
+      const entities = super.dispatchAdvanceEvent(flow, world, rng, evt);
       
       if (evt.op === 'player.launch' && this.state.players.total < this.state.players.required) {
         
@@ -533,7 +635,7 @@ export const registry = (() => {
           ms: evt.ms,
           name: evt.name,
           anchorMs: evt.ms,
-          pos: Pt.polar({ tur, mag: 15 }),
+          pos: Pt.polar({ tur, mag: 10 }),
           tur: tur + 0.5,
           buttons: ([ 'dirL', 'dirR', 'dirU', 'dirD', 'turL1', 'turL2', 'turR1', 'turR2', 'mod0', 'act0', 'act1', 'act2', 'act3', 'act4', 'act5', 'act6' ] as const)[cl.toObj](v => [ v, false ]),
           shootMs: null,
@@ -547,6 +649,7 @@ export const registry = (() => {
       if (evt.op === 'player.cancel') {
         
         this.state.players.total--;
+        this.state.players.fulfilledMs = null;
         
         delete entities[`${Player.clsName}/${evt.session.id}`];
         
@@ -556,11 +659,9 @@ export const registry = (() => {
       
     }
     
-    public renderClip(flow: Flow | { ms: number }, draw: Draw) {
-      draw.circle({ pos: new Pt(), r: 4 }); // Reveal the center counter
-    }
+    renderClip(flow: Flow, draw: Draw) { draw.circle({ pos: new Pt(), r: 2 }); }
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw) {
+    getRenderOps(flow: Flow, draw: Draw) {
       
       return [ { z: 1, fn: () => {
         
@@ -570,17 +671,17 @@ export const registry = (() => {
           : null;
           
         draw.text({
-          x: 0, y: ms ? -0.75 : 0, tur: 0,
+          x: 0, y: ms ? -0.5 : 0, tur: 0,
           text: `${players.total} / ${players.required}`,
-          fontSize: 1.2,
-          align: 'center',
+          fontSize: 0.75,
+          align: '=',
           fill: '#f55'
         });
         if (ms) draw.text({
-          x: 0, y: 0.75, tur: 0,
-          text: ms.toString(10),
-          fontSize: 1.2,
-          align: 'center',
+          x: 0, y: 0.5, tur: 0,
+          text: Math.round(ms).toString(10),
+          fontSize: 0.75,
+          align: '=',
           fill: '#f55'
         });
         
@@ -591,28 +692,172 @@ export const registry = (() => {
   };
   class Plunge extends Stage {
     
-    public static readonly clsName: string = 'Plunge';
+    static readonly clsName: string = 'Plunge';
+    
+    static spinTurVel = 0.2;
     
     protected state: Stage['state'] & {
+      level: number,
+      spinMs: number,
+      step: { ms: number, term: 'wait' | 'spin' | 'open' | 'shut' }
     };
-    constructor(state: Plunge['state']) { super(state); this.state = state; }
+    
+    static fromInitialState = (inp: { flow: Flow, rng: Rng, level: number, players: Obj<Player>, airlockPos: Pt, airlockTur: number }) => {
+      
+      const { flow, rng, level, players, airlockPos, airlockTur } = inp;
+      
+      const airlockRadius = 15;
+      const terrain: Physical[] = Stage.airlock({ flow, num: 0, pos: airlockPos, tur: airlockTur });
+      
+      const spinMs = 1000 + rng.nextFlt() * 3000;
+      const tur = airlockTur + Plunge.spinTurVel * (spinMs * 0.001);
+      const gateHead0 = airlockPos.add(Pt.polar({ tur: tur + (1 / 5) * -0.5, mag: airlockRadius }));
+      const gateHead1 = airlockPos.add(Pt.polar({ tur: tur + (1 / 5) * +0.5, mag: airlockRadius }));
+      
+      terrain.push(Obstacle.fromInitialState({
+        flow,
+        bound: new CircleBound({ r: 3 }),
+        pos: gateHead0,
+        tur: 0
+      }));
+      terrain.push(Obstacle.fromInitialState({
+        flow,
+        bound: new CircleBound({ r: 3 }),
+        pos: gateHead1,
+        tur: 0
+      }));
+      
+      const len = debuggg ? 10 : (20 + rng.nextFlt() * 50);
+      const gateTail0 = gateHead0.add(Pt.polar({ tur, mag: len }));
+      const gateTail1 = gateHead1.add(Pt.polar({ tur, mag: len }));
+      terrain.push(Stage.wall({ flow, w: 3, pt0: gateHead0, pt1: gateTail0 }));
+      terrain.push(Stage.wall({ flow, w: 3, pt0: gateHead1, pt1: gateTail1 }));
+      
+      terrain.push(...(2 + level * 2)[cl.toArr](n => {
+        
+        return Zombie.fromInitialState({
+          flow,
+          rng,
+          num: n,
+          pos: Pt.mid([ gateHead0, gateHead1 ]).add(Pt.polar({ tur, mag: (0.2 + rng.nextFlt() * 0.6) * len })),
+          tur: rng.nextFlt()
+        });
+        
+      }));
+      
+      const airlock1 = (() => {
+        
+        const airlockApothem = airlockRadius * Math.cos(Math.PI / 5);
+        const geom = Stage.airlock({
+          flow,
+          num: 1,
+          pos: airlockPos.add(Pt.polar({ tur, mag: airlockApothem * 2 + len })),
+          tur: tur + 0.5
+        });
+        
+        return geom.slice(1); // Remove the 1st wall
+        
+      })();
+      terrain.push(...airlock1);
+      
+      return new Plunge({
+        ms: flow.ms,
+        level,
+        spinMs,
+        step: { ms: flow.ms, term: 'wait' },
+        entities: {
+          
+          ...players,
+          ...terrain[cl.toObj](obs => [ obs.getId(), obs ])
+          
+        }
+      });
+      
+    };
+    
+    constructor(state: Plunge['state']) {
+      super(state);
+      this.state = state;
+    }
+    
+    getRelations(flow: Flow, lastRels: null | Play.Rel[]) {
+      
+      const r = super.getRelations(flow, lastRels);
+      
+      const { state } = this;
+      const { step } = state;
+      if (step.term === 'wait')
+        r.rels.push({ type: 'plungeSpin', ms: step.ms + 1000 * 3 });
+      
+      if (step.term === 'spin')
+        r.rels.push({ type: 'plungeOpen', ms: step.ms + state.spinMs });
+      
+      if (step.term === 'open') {
+        
+        // const { player = [] } = r.relGroups;
+        
+      }
+      
+      return r;
+      
+    }
+    
+    dispatchAdvanceRelations(world: World, flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.Rel): void {
+      
+      super.dispatchAdvanceRelations(world, flow, entities, rng, rel);
+      
+      if (rel.type === 'plungeSpin') {
+        
+        const airlock0 = entities[cl.toArr](ent => {
+          if (!cl.inCls(ent, Obstacle))                                 return cl.skip;
+          if (!ent.getId()[cl.hasHead](`${Obstacle.clsName}/airlock0`)) return cl.skip;
+          return ent;
+        });
+        const mid = Pt.mid(airlock0.map(obs => obs.getTransform(flow).pos));
+        const r = airlock0[0].getTransform(flow).pos.sub(mid).len();
+        
+        for (const obs of airlock0) {
+          
+          obs.reanchor<Obstacle['state']>(flow, state => {
+            
+            const turVel = Plunge.spinTurVel;
+            const initTur = mid.getTur(state.pos);
+            state.forces = [
+              { ms: flow.ms, durMs: this.state.spinMs, type: 'arc', r, initTur, vel: turVel },
+              { ms: flow.ms, durMs: this.state.spinMs, type: 'turVel', amt: turVel }
+            ];
+            
+          });
+          
+        }
+        
+        this.state.step = { ms: flow.ms, term: 'spin' };
+        
+      }
+      
+      if (rel.type === 'plungeOpen') {
+        delete entities[`${Obstacle.clsName}/airlock0/0`];
+        this.state.step = { ms: flow.ms, term: 'open' };
+      }
+      
+    }
     
   };
   
   class Staged extends Entity {
     
-    public static readonly clsName: string = 'Staged';
+    static readonly clsName: string = 'Staged';
     
     protected state: Entity['state'] & { id: string };
     constructor(state: Staged['state']) { super(state); this.state = state; }
     
-    public getId() { return this.state.id; }
+    getId() { return this.state.id; }
     
   };
   
   abstract class Physical extends Staged {
     
-    public static readonly clsName: string = 'Physical';
+    static readonly clsName: string = 'Physical';
     
     protected state: Staged['state'] & {
       anchorMs: number,
@@ -625,9 +870,10 @@ export const registry = (() => {
       this.state = state;
     }
     
-    protected getForces(flow: Flow | { ms: number }): Play.Force[] { return []; }
+    getForces(flow: Flow) { return flow.cached(`${this.state.id}/forces`, () => this.getForces0(flow)); }
+    getForces0(flow: Flow): Play.Force[] { return []; }
     
-    protected calcForce(flow: Flow | { ms: number }, force: Play.Force): { x: number, y: number, tur: number } {
+    protected calcForce(flow: Flow, force: Play.Force): { x: number, y: number, tur: number } {
       
       const durSc = Math.min(flow.ms - force.ms, force.durMs ?? Infinity) * 0.001;
       
@@ -644,10 +890,10 @@ export const registry = (() => {
       
       if (force.type === 'arc') {
         
-        const { initAng, r, vel } = force;
+        const { initTur, r, vel } = force;
         const { x, y } = Pt.add([
-          Pt.polar({ tur: initAng + vel * durSc, mag: r }), // Circular motion around the origin
-          Pt.polar({ tur: initAng + 0.5, mag: r })          // Constant offset by the circle radius so at t=0 the force is { x: 0, y: 0
+          Pt.polar({ tur: initTur + vel * durSc, mag: r }), // Circular motion around the origin
+          Pt.polar({ tur: initTur + 0.5, mag: r })          // Constant offset by the circle radius so at t=0 the force is { x: 0, y: 0
         ]);
         return { x, y, tur: 0 };
         
@@ -671,17 +917,18 @@ export const registry = (() => {
       
     }
     
-    public abstract getBound(flow: Flow | { ms: number }): Bound;
+    abstract getBound(flow: Flow): Bound;
     
-    public canCollide(phys: Physical) { return true; }
+    canCollide(phys: Physical) { return true; }
     
-    public advanceCollide(inp: { world: World, flow: Flow | { ms: number }, rng: Rng, entities: Obj<Entity>, phys: Physical }) {}
+    advanceCollide(inp: { world: World, flow: Flow, rng: Rng, entities: Obj<Entity>, phys: Physical }) {}
     
-    public getWeight(flow: Flow | { ms: number }) { return 1; }
+    getWeight(flow: Flow) { return 1; }
     
-    public getRelationGroups(flow: Flow | { ms: number }): Play.RelationGroup[] { return [ 'physics' ]; }
+    getRelationGroups(flow: Flow): Play.RelationGroup[] { return [ 'physics' ]; }
     
-    public getTransform(flow: Flow | { ms: number }) {
+    getTransform(flow: Flow) { return flow.cached(`${this.state.id}/tfm`, () => this.getTransform0(flow)); }
+    getTransform0(flow: Flow) {
       
       const { anchorMs } = this.state;
       
@@ -697,7 +944,7 @@ export const registry = (() => {
         // Subtract any part of the force which predates our anchor; that offset from the force is
         // already baked into the anchor!
         if (force.ms < anchorMs) {
-          const f = this.calcForce({ ms: anchorMs }, force);
+          const f = this.calcForce(flow.jumpTo(anchorMs), force);
           pos = pos.sub(f);
           tur -= f.tur;
         }
@@ -708,19 +955,23 @@ export const registry = (() => {
       
     }
     
-    public reanchor<S extends Physical['state']>(flow: Flow | { ms: number }, fn: (state: S) => void = () => {}) {
+    reanchor<S extends Physical['state']>(flow: Flow, fn: (state: S) => void = () => {}) {
       
+      // TODO: how does this (and how ought it) interact with the Flow cache?
       const { pos, tur } = this.getTransform(flow);
       this.state.anchorMs = flow.ms;
       this.state.pos = pos;
       this.state.tur = tur;
+      
+      flow.cacheInvalidate(`${this.state.id}/tfm`);
+      
       fn(this.state as S);
       
     }
     
-    public getColour(flow: Flow | { ms: number }): `#${string}` { return '#f00'; }
+    getColour(flow: Flow): `#${string}` { return '#f00'; }
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw, tfm = this.getTransform(flow)) {
+    getRenderOps(flow: Flow, draw: Draw, tfm = this.getTransform(flow)) {
       
       return [ { z: 0, fn: () => {
         
@@ -739,13 +990,31 @@ export const registry = (() => {
   
   class Obstacle extends Physical {
     
-    public static readonly clsName: string = 'Obstacle';
+    static readonly clsName: string = 'Obstacle';
     
     protected state: Physical['state'] & {
+      colour: `#${string}`,
       bound: Bound,
       tur: number,
       forces: Play.Force[]
     };
+    
+    static fromInitialState = (inp: { flow: Flow, id?: null | string, bound: Bound, pos: Pt, tur: number, forces?: Play.Force[], colour?: `#${string}` }) => {
+      
+      const { flow, id = null, bound, pos, tur, forces = [], colour = '#000' } = inp;
+      
+      return new Obstacle({
+        ms: flow.ms,
+        id: id ?? `${Obstacle.clsName}/wall/${(pos.x * 0.99 + pos.y + pos.x * pos.y).toString(36)}`,
+        anchorMs: flow.ms,
+        pos,
+        tur,
+        bound,
+        forces,
+        colour
+      });
+      
+    }
     
     constructor(state: Obstacle['state']) {
       super(state);
@@ -754,17 +1023,17 @@ export const registry = (() => {
     
     encode() { return this.state; }
     
-    public canCollide(phys: Physical) { return !cl.isCls(phys, Obstacle); }
+    canCollide(phys: Physical) { return !cl.isCls(phys, Obstacle); }
     
-    public getForces() { return this.state.forces; }
+    getForces0() { return this.state.forces; }
     
-    public getWeight() { return Infinity; }
+    getWeight() { return Infinity; }
     
-    public getBound() { return this.state.bound; }
+    getBound() { return this.state.bound; }
     
-    public getColour(): `#${string}` { return '#000'; }
+    getColour(): `#${string}` { return this.state.colour; }
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw, tfm = this.getTransform(flow)) {
+    getRenderOps(flow: Flow, draw: Draw, tfm = this.getTransform(flow)) {
       
       return [ { z: 0, fn: () => {
         
@@ -778,17 +1047,58 @@ export const registry = (() => {
     
   };
   
-  abstract class Member extends Physical {
+  abstract class Humanoid extends Physical {
     
-    public static readonly clsName: string = 'Member';
+    static readonly clsName: string = 'Humanoid';
+    
+    static walkTurnForces = (inp: { anchor: { ms: number, tfm: { pos: Pt, tur: number } }, walkVel: Pt, facing: 'fwd' | 'bwd', turVelSigned: number }): Play.Force[] => {
+      
+      // Note that `inp.facing` is needed to control whether the turning force faces in the arc
+      // direction or opposite
+      
+      const forces: Play.Force[] = [];
+      
+      const { anchor, walkVel, turVelSigned, facing } = inp;
+      
+      const walkVelLen = walkVel.len();
+      if (walkVelLen) {
+        
+        if (turVelSigned) {
+          
+          const turVelMag = Math.abs(turVelSigned);
+          const turVelSgn = Math.sign(turVelSigned);
+          
+          const secsPerTurn = 1 / turVelMag;
+          const circum = secsPerTurn * walkVelLen;
+          const r = circum / (2 * Math.PI);
+          const initTur = anchor.tfm.tur - turVelSgn * 0.25 + { fwd: 0, bwd: 0.5 }[facing];
+          
+          // TODO: only correct for motion along the facing axis (not strafing)
+          forces.push({ ms: anchor.ms, durMs: null, type: 'arc', r, initTur, vel: turVelSigned }); // The velocity direction rotates at the same rate as the heading
+          
+        } else {
+          
+          forces.push({ ms: anchor.ms, durMs: null, type: 'vel', ...walkVel })
+          
+        }
+        
+      }
+      
+      if (turVelSigned) forces.push({ ms: anchor.ms, durMs: null, type: 'turVel', amt: turVelSigned });
+      
+      return forces;
+      
+    };
+    
+    getBaseStats() { return { posVel: 4, turVel: 0.3 }; }
     
   };
   
-  class Player extends Member {
+  class Player extends Humanoid {
     
-    public static readonly clsName: string = 'Player';
+    static readonly clsName: string = 'Player';
     
-    protected static bound = new CircleBound({ r: 0.3 });
+    static bound = new CircleBound({ r: 0.3 });
     
     protected state: Physical['state'] & {
       name: string,
@@ -801,14 +1111,15 @@ export const registry = (() => {
       this.state = state;
     }
     
-    protected getBaseStats() { return {
-      posSpeed: 5,
-      turSpeed: 0.5,
-      visionSweep: 0.18,
-      visionRange: 120
+    getBaseStats() { return {
+      ...super.getBaseStats(),
+      posVel: 4,
+      turVel: 0.3,
+      visionSweep: 0.1,
+      visionRange: 20
     }; }
     
-    protected getForces(flow: Flow | { ms: number; }) {
+    getForces0(flow: Flow) {
       
       const forces: Play.Force[] = [];
       const { buttons } = this.state;
@@ -823,11 +1134,11 @@ export const registry = (() => {
           return;
         }
         
-        const tur = +buttons.turR1 - +buttons.turL1;
+        const turPol = +buttons.turR1 - +buttons.turL1;
         
-        const { posSpeed: basePosSpeed, turSpeed: baseTurSpeed } = this.getBaseStats();
-        const posSpeed = basePosSpeed * (1 + (+buttons.mod0 * +1.0));
-        const turSpeed = baseTurSpeed * (1 + (+buttons.mod0 * -0.25));
+        const { posVel: basePosSpeed, turVel: baseTurSpeed } = this.getBaseStats();
+        const posVel = basePosSpeed * (1 * (buttons.mod0 ? 2.00 : 1) * (buttons.act0 ? 0.8 : 1.0)); // Faster when sprinting, slower when acting
+        const turVel = baseTurSpeed * (1 * (buttons.mod0 ? 0.75 : 1) * (buttons.act0 ? 0.2 : 1.0)); // Slower when sprinting, slower when acting
         
         // Movement penalties; strafing is slower; backwards is slowest
         const walkVelMult = false                                ? 1
@@ -840,33 +1151,18 @@ export const registry = (() => {
         const strfPol = +this.state.buttons.dirR - +this.state.buttons.dirL; // "strafe"
         const walkVel = new Pt({ x: walkPol, y: strfPol })
           .norm()                       // fixed-length
-          .mult(posSpeed * walkVelMult) // apply walk vel mult
+          .mult(posVel * walkVelMult) // apply walk vel mult
           .addTur(this.state.tur);      // Align with rotation
         
-        const walkVelLen = walkVel.len();
-        if (walkVelLen) {
-          
-          if (tur) {
-            
-            const secsPerTurn = 1 / turSpeed;
-            const circum = secsPerTurn * walkVelLen;
-            const r = circum / (2 * Math.PI);
-            const initAng = this.state.tur - tur * 0.25; // Quarter turn offset in the direction of turning
-            
-            // TODO: this seems buggy for anything other than pure forward motion
-            forces.push({ ms: this.state.anchorMs, durMs: null, type: 'arc', r, initAng, vel: tur * walkPol * turSpeed });
-            
-          } else {
-            
-            forces.push({ ms: this.state.anchorMs, durMs: null, type: 'vel', ...walkVel })
-            
-          }
-          
-        }
-        
-        if (tur) {
-          forces.push({ ms: this.state.anchorMs, durMs: null, type: 'turVel', amt: tur * turSpeed });
-        }
+        forces.push(...Humanoid.walkTurnForces({
+          anchor: {
+            ms: this.state.anchorMs,
+            tfm: { pos: this.state.pos, tur: this.state.tur }
+          },
+          walkVel,
+          facing: (walkPol >= 0) ? 'fwd' : 'bwd',
+          turVelSigned: turVel * turPol
+        }));
         
       })();
       
@@ -874,11 +1170,30 @@ export const registry = (() => {
       
     }
     
-    public getRelationGroups(flow: Flow | { ms: number }): Play.RelationGroup[] {
+    getBound() { return Player.bound; }
+    
+    getRelationGroups(flow: Flow): Play.RelationGroup[] {
       return [ ...super.getRelationGroups(flow), 'player' ];
     }
     
-    public advanceButton(flow: Flow | { ms: number }, rng: Rng, button: Play.Button, act: boolean) {
+    getRelations(flow: Flow): Play.EntityRel[] {
+      
+      const rels: Play.EntityRel[] = super.getRelations(flow);
+      
+      if (this.state.shootMs !== null) {
+        
+        const msPerBullet = 150;
+        const firstBulletMs = Math.max(this.state.shootMs, this.state.bulletRearmMs);
+        for (let ms = firstBulletMs; ms <= flow.ms; ms += msPerBullet)
+          rels.push({ type: 'ent', entId: this.state.id, ms, inp: { type: 'bullet' }});
+        
+      }
+      
+      return rels;
+      
+    }
+    
+    advanceButton(flow: Flow, rng: Rng, button: Play.Button, act: boolean) {
       
       this.reanchor<Player['state']>(flow, state => {
         
@@ -889,43 +1204,23 @@ export const registry = (() => {
       
     }
     
-    public getRelations(flow: Flow | { ms: number; }): Play.EntityRel[] {
-      
-      const rels: Play.EntityRel[] = [];
-      
-      if (this.state.shootMs !== null) {
-        
-        const msPerBullet = 150;
-        const firstBulletMs = Math.max(this.state.shootMs, this.state.bulletRearmMs);
-        for (let ms = firstBulletMs; ms <= flow.ms; ms += msPerBullet) {
-          rels.push({ type: 'ent', entId: this.state.id, ms, inp: {
-            type: 'bullet',
-            ms
-          }});
-        }
-        
-      }
-      
-      return rels;
-      
-    }
-    
-    public advanceRelation(world: World, flow: Flow | { ms: number }, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRel['inp']): void {
+    advanceRelation(flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRelInp): void {
       
       if (rel.type === 'bullet') {
         
         const msPerBullet = 150;
         
         const bulletId = `${Bullet.clsName}/${rng.nextFlt().toString(36).slice(2)}`
-        const tfm = this.getTransform({ ms: rel.ms });
+        const tfm = this.getTransform(flow.jumpTo(rel.ms));
         
+        const tur = tfm.tur + 0.005 - 0.01 * rng.nextFlt();
         entities[bulletId] = new Bullet({
           id: bulletId,
           ms: rel.ms,
           anchorMs: rel.ms,
-          pos: tfm.pos.add(Pt.polar({ tur: tfm.tur, mag: 0.5 })),
-          tur: tfm.tur,
-          vel: 10
+          pos: tfm.pos.add(Pt.polar({ tur, mag: Player.bound.boundingRadius() + Bullet.bound.boundingRadius() + 0.05 })),
+          tur,
+          vel: 30
         });
         
         this.state.bulletRearmMs = Math.max(this.state.bulletRearmMs, rel.ms + msPerBullet);
@@ -934,16 +1229,16 @@ export const registry = (() => {
       
     }
     
-    public getBound() { return Player.bound; }
+    getColour(flow: Flow): `#${string}` { return '#840'; }
     
-    public renderClip(flow: Flow | { ms: number }, draw: Draw) {
+    renderClip(flow: Flow, draw: Draw) {
       const { visionSweep, visionRange } = this.getBaseStats();
       const { pos, tur } = this.getTransform(flow);
       draw.cone({ pos, tur, sweep: visionSweep, r: visionRange });
       draw.circle({ pos, r: 2 });
     }
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw, tfm = this.getTransform(flow)) {
+    getRenderOps(flow: Flow, draw: Draw, tfm = this.getTransform(flow)) {
       
       return [ { z: 0, fn: () => {
         
@@ -952,9 +1247,9 @@ export const registry = (() => {
         
         draw.line({
           pt0: tfm.pos,
-          pt1: tfm.pos.add(Pt.polar({ tur: tfm.tur, mag: 20 })),
+          pt1: tfm.pos.add(Pt.polar({ tur: tfm.tur, mag: 3 })),
           line: colour,
-          lineW: 0.1
+          lineW: 0.03
         });
         
         const textPos = tfm.pos.add(Pt.polar({ tur: tfm.tur + 0.5, mag: 1 }));
@@ -973,11 +1268,157 @@ export const registry = (() => {
     
   };
   
+  class Zombie extends Humanoid {
+    
+    static readonly clsName: string = 'Zombie';
+    
+    static bound = new CircleBound({ r: 0.5 });
+    static planDelayMs = 1000 * 5;
+    
+    protected state: Physical['state'] & {
+      plan: { ms: number } & [
+        { type: 'bored',       dir: 'lh' | 'rh' },
+        { type: 'destination', pos: Pt },
+        { type: 'player',      pos: Pt, player: Player }
+      ][number],
+      nextPlanMs: number
+    };
+    
+    static fromInitialState = (inp: { flow: Flow, rng: Rng, num: number, pos: Pt, tur: number }) => {
+      
+      const { flow, rng, num, pos, tur } = inp;
+      return new Zombie({
+        ms: flow.ms,
+        id: `${Zombie.clsName}/zombie/${num}`,
+        anchorMs: flow.ms,
+        pos,
+        tur,
+        plan: { type: 'bored', ms: flow.ms, dir: rng.elem([ 'lh', 'rh' ] as const)! },
+        nextPlanMs: flow.ms + 1000 * 5
+      });
+      
+    };
+    
+    constructor(state: Zombie['state']) {
+      super(state);
+      this.state = state;
+    }
+    
+    getBound() { return Zombie.bound; }
+    
+    getRelations(flow: Flow): Play.EntityRel[] {
+      
+      const rels: Play.EntityRel[] = super.getRelations(flow);
+      
+      for (let ms = this.state.nextPlanMs; ms <= flow.ms; ms += Zombie.planDelayMs)
+        rels.push({ type: 'ent', entId: this.state.id, ms, inp: { type: 'zombiePlan' } });
+      
+      return rels;
+      
+    }
+    
+    advanceRelation(flow: Flow, entities: Obj<Entity>, rng: Rng, rel: Play.EntityRelInp): void {
+      
+      if (rel.type === 'zombiePlan') {
+        
+        const players = entities[cl.toArr](v => cl.isCls(v, Player) ? v : cl.skip);
+        const player = rng.elem(players);
+        
+        this.reanchor<Zombie['state']>(flow, state => {
+          
+          state.plan = !player
+            ? { ms: rel.ms, type: 'bored',  dir: rng.elem([ 'lh', 'rh' ] as const)! }
+            : { ms: rel.ms, type: 'player', pos: player.getTransform(flow).pos.add(Pt.polar({ tur: rng.nextFlt(), mag: 2 })), player };
+          
+          state.nextPlanMs = Math.max(state.nextPlanMs, rel.ms + Zombie.planDelayMs);
+          
+          if (state.plan.type === 'player')
+            state.tur = state.pos.getTur(state.plan.pos);
+          
+        });
+        
+      }
+      
+    }
+    
+    advanceCollide(inp: { world: World, flow: Flow, rng: Rng, entities: Obj<Entity>, phys: Physical }) {
+      
+      if (cl.isCls(inp.phys, Bullet)) delete inp.entities[this.state.id];
+      
+    }
+    
+    getForces0(flow: Flow): Play.Force[] {
+      
+      const forces = super.getForces0(flow);
+      
+      const { posVel, turVel } = this.getBaseStats();
+      const { plan } = this.state;
+      
+      if (plan.type === 'bored') {
+        
+        forces.push(...Humanoid.walkTurnForces({
+          anchor: {
+            ms: this.state.anchorMs,
+            tfm: { pos: this.state.pos, tur: this.state.tur }
+          },
+          walkVel: Pt.polar({ tur: this.state.tur, mag: posVel }),
+          facing: 'fwd',
+          turVelSigned: turVel * { lh: -1, rh: +1 }[plan.dir]
+        }));
+        
+      }
+      
+      if (plan.type === 'player') {
+        
+        const walkVel = plan.pos
+          .sub(this.state.pos)
+          .norm()
+          .mult(posVel);
+        forces.push({ ms: plan.ms, type: 'vel', durMs: null, ...walkVel.encode() });
+        
+      }
+      
+      return forces;
+      
+    }
+    
+    getColour(flow: Flow): `#${string}` { return '#4a0'; }
+    
+    getRenderOps(flow: Flow, draw: Draw, tfm = this.getTransform(flow)) {
+      
+      return [ { z: 0, fn: () => {
+        
+        const colour = this.getColour(flow);
+        this.getBound().render(tfm, draw, { fill: colour });
+        
+        draw.line({
+          pt0: tfm.pos,
+          pt1: tfm.pos.add(Pt.polar({ tur: tfm.tur, mag: 0.65 })),
+          line: colour,
+          lineW: 0.2
+        });
+        
+        const textPos = tfm.pos.add(Pt.polar({ tur: tfm.tur + 0.5, mag: 1 }));
+        draw.text({
+          text: 'rrghhhh',
+          x: textPos.x,
+          y: textPos.y,
+          tur: tfm.tur + 0.25,
+          fontSize: 0.6,
+          fill: `${colour}8`
+        });
+        
+      }}];
+      
+    }
+    
+  };
+  
   class Bullet extends Physical {
     
-    public static readonly clsName: string = 'Bullet';
+    static readonly clsName: string = 'Bullet';
     
-    protected static bulletBound = new CircleBound({ r: 0.1 });
+    static bound = new RectBound({ w: 1.5, h: 0.1 });
     
     protected state: Physical['state'] & {
       vel: number
@@ -987,29 +1428,19 @@ export const registry = (() => {
       this.state = state;
     }
     
-    public canCollide(phys: Physical) { return !cl.isCls(phys, Bullet); }
+    canCollide(phys: Physical) { return !cl.isCls(phys, Bullet); }
     
-    public advanceCollide(inp: { world: World, flow: Flow | { ms: number }, rng: Rng, entities: Obj<Entity>, phys: Physical }) {
+    advanceCollide(inp: { world: World, flow: Flow, rng: Rng, entities: Obj<Entity>, phys: Physical }) {
       
-      // TODO: HEEERE
-      // - enough berth from the player?
-      // - how to handle future-timed events (like an entity expiry...)
-      //   - I think TimeStep can offer a registry of future events - they don't get stepped to,
-      //     but they get processed when they're reached. Registry of such events is deterministic,
-      //     maybe really `World` should implement this via timeStep.rel?? But the main thing that
-      //     would be lacking is an ability to emit a definitively-timed, no-binary-search-required
-      //     timeStep.rel event... it's doable I think!! It's the `setTimeout` of TimeStep - maybe
-      //     "timeStep.moment"?
-      if (globalThis.zzz) console.log('ZZZ COLLIDE', { p0: this, p1: inp.phys });
       delete inp.entities[this.state.id];
       
     }
     
-    public getBound(flow: Flow | { ms: number }) { return Bullet.bulletBound; }
+    getBound(flow: Flow) { return Bullet.bound; }
     
-    public getColour(flow: Flow | { ms: number }): `#${string}` { return '#a00'; }
+    getColour(flow: Flow): `#${string}` { return '#a00'; }
     
-    public getRenderOps(flow: Flow | { ms: number }, draw: Draw, tfm = this.getTransform(flow)) {
+    getRenderOps(flow: Flow, draw: Draw, tfm = this.getTransform(flow)) {
       
       return [ { z: 0, fn: () => {
         
@@ -1019,7 +1450,7 @@ export const registry = (() => {
       
     }
     
-    public getForces(flow: Flow | { ms: number; }): Play.Force[] {
+    getForces0(flow: Flow): Play.Force[] {
       
       const dir = Pt.polar({ tur: this.state.tur, mag: this.state.vel });
       return [
@@ -1038,13 +1469,13 @@ export const registry = (() => {
     PolygonBound,
     
     World,
-    Stage,
     WaitingRoom,
     Plunge,
     
-    Physical,
     Obstacle,
     Player,
+    Zombie,
+    
     Bullet
     
   } satisfies WireRegistry;
@@ -1054,7 +1485,18 @@ export const registry = (() => {
   
 })();
 
-export default (signals?: TimeStepInp<any, any, any, any>['signals']) => {
+export type PlayInp = {
+  observe?: {
+    tick?: (inp: {
+      advanceMs:   number,
+      subticks:    number;
+      relChecks:   number,
+      elapsedPms:  number,
+      numEvents:   number
+    }) => void
+  }
+};
+export default (inp: PlayInp) => {
   
   const pendingEvents: Play.Event[] = [];
   
@@ -1066,20 +1508,22 @@ export default (signals?: TimeStepInp<any, any, any, any>['signals']) => {
     msPerTick: 9, // 60fpsc is 16.666mspf - 9mspt is just less than 2 ticks per 60fpsc frame
     minMsPerTick: 1.5,
     
-    maxEventsPerSnapshot: 100,
-    maxSnapshotsToStore: 50,
+    maxSnapshotEvents: 100,
+    maxSnapshotDurMs: 400,
+    maxSnapshots: 10,
     
     state: { world: new World({
       name: 'zombies',
-      stage: WaitingRoom.fromInitialState({ ms: 0, players: { total: 0, required: 3, fulfilledMs: null, delayLaunchMs: 1000 * 10 } })
+      stage: WaitingRoom.fromInitialState({
+        flow: new Flow(0),
+        players: { required: 3 }
+      })
     }) },
-    advance: (state, evt, rng) => state.world.advance(rng, evt),
+    advance: (state, evt, rng) => state.world.dispatchAdvanceEvent(rng, evt),
     relationCfg: {
       quality: 4,
-      find: (flow, state, lastRels) => state.world.getRelations(flow, lastRels)
-    },
-    
-    ...(signals && { signals })
+      find: (flow, state, lastRels) => state.world.getRelations(new Flow(flow.ms), lastRels)
+    }
     
   });
   
@@ -1090,7 +1534,10 @@ export default (signals?: TimeStepInp<any, any, any, any>['signals']) => {
     const events = [ ...pendingEvents ].sort((evt0, evt1) => evt0.ms - evt1.ms);
     pendingEvents.length = 0;
     
-    for (const event of events) playTimeStep.processEvent(event);
+    for (const event of events) {
+      const processed = playTimeStep.processEvent(event);
+      inp.observe?.tick?.(processed);
+    }
     
     playTimeStep.tickUpToMs(Math.max(0, (ms + offsetMs) - patienceMs));
     
@@ -1105,7 +1552,16 @@ export default (signals?: TimeStepInp<any, any, any, any>['signals']) => {
     setPatienceMs:    (pMs: number)        => patienceMs = pMs,
     setOffsetMs:      (oMs: number)        => offsetMs = oMs,
     getOffsetMs:      ()                   => offsetMs,
-    addEvent:         (event: Play.Event)  => pendingEvents.push(event)
+    addEvent:         (event: Play.Event)  => pendingEvents.push(event),
+    replaceEvent:     (old: Play.Event, next: null | Play.Event) => {
+      
+      // Events not yet processed by the ticker aren't in the timestep's history yet
+      const ind = pendingEvents.indexOf(old);
+      if (ind === -1)    return playTimeStep.replaceEvent(old, next);
+      if (next === null) return void pendingEvents.splice(ind, 1);
+      pendingEvents[ind] = next;
+      
+    }
   };
   
 };

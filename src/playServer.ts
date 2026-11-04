@@ -1,32 +1,31 @@
-import type { Session, SessionKeeper } from '@gershy/lilac-platformer';
-import type Logger from '@gershy/logger';
-import type { Play } from './play.ts';
+import type { PlatformInvokeFn, PlatformLaunchFn, Session } from '@gershy/lilac-platformer';
+import type { Play }                                        from './play.ts';
 
-export default async (inp: { debug: boolean, logger: Logger, jsfnImport: any, sessionKeeper: SessionKeeper }) => {
+type LocalData = {
+  webAssets?: { [K in 'html' | 'js']: { code: number, headers?: Obj<string>, body: string } }
+};
+
+export const launchFn = (async inp => {
   
   const { default: playFn } = inp.jsfnImport('./play.ts') as typeof import('./play.ts');
   
-  const { logger, sessionKeeper } = inp;
+  const { logger, sessionKeeper, localData } = inp;
   
   // TODO: name claim/release could be more efficient with a static shuffled array...
   type Player = {
     session: Session,
     name: string
   };
-  const names = new Set('academician acceptor ace achiever adept adherent administrator admirer adorer advantage adviser advisor advocate aelurophile aerophile aesthete aid aide ailurophile alannah alleviator ally almsgiver almsperson alternate altruist agent ambassador amoret angel aficionada aficionado affluential americophile anglophile apostle appreciator apprentice arctophile arbiter archetype architect artisan artist artiste ascendant aspirant asset assignee assigner assistant associate astrophile athlete attendant audiophile author authority autodidact baby backbone backer backup baron beatus beauty begetter being believer belle benchmark benefactor benefactress beneficiary benefit bestower bibliophile bigwig biophile blessing bodyguard boss booster brain brother bud buddy buff builder campaigner captain carer caretaker cartophile catalyst cause celebrant celebrator chair chairperson chamberlain champ champion chaperon charmer cherub cherisher chief chieftan child chum cinephile clerisy climber cognoscente cognoscenti cohort coiner collaborator colleague collector comforter commander companion compeller complement composer comrade concierge conductor confederate conferrer confidant confrere connoisseur conservator consoler consul consultant contributor controller convive cornerstone cosmocrat cosmopolitan cosmopolite councillor counsel counselor counsellor count creator credit crew cub curator custodian cynosure dad dancer darling daughter dean dear defender deipnosophist demophile designer devisee devisor devotee digerati dilly director disciple discophile discoverer distributor doer doll donee donor doozy doula doyen doyenne dreamboat duke dynamo earl ecstatic einstein elder employer enchanter enchantress encourager endorser engineer enkindler enophile ensurer entertainer enthusiast entrepreneur epididact epicure epicurean epitome ergophile escort essence eudaimonist example exec executive exemplar excellency experimenter expert exponent facilitator family fan fancier fascinator fashioner favourite financier fireball fireman flame folks foodie foodophile force forebearer forefather foreman forerunner foreseer foundation founder fount fountain fountainhead francophile friend gallophile gastronome gastronomer gastronomist generator gem genius gentleman gentlewoman germanophile gift givee giver godparent godsend gourmet governor grandee grantee grantor grubstaker guarantor guardian guest guide guru handler head heart heartthrob height heir heiress heliophile hellenophile help helper helpmate hero heroine highflier hippophile hit homemaker hopeful host hotshot humanitarian husband icon iconophile ideal idol idolizer illuminator iluvshaina improvement inamorata inamorato individual indophile industrialist infant influence influentialinheritor initiator innocent innovator inspiration inspirer inspiriter institutor intellect intellectual intelligentsia intimate introducer inventor invitee inviter jazzophile keeper key kingpin knight lady lamb latinophile latitudinarian laureate lead leader legatee legator legend legislator liberal libertarian lieutenant lightworker linguaphile livewire logophile lord lover lulu luminary maestro magician magistrate maker manager marquess marquis marvel master mastermind matriarch materfamilias mediator meditator meliorist mentor metropolitan minder miracle mitigator mate model mom monitor moppet mother motor mover motivator musicophile mycophile nabob neighbour nemophilist neophile neonate neoteric nestling newborn nipper nobleman nonesuch notable nurse nursling nurturer officer official offspring oenophile omnist operator optimist orchestrator orchidophile organizer original originator ornithophile overseer owner pacifier pal paladin pangloss pansophist paraclete paradigm paragon paramount pard parent participant partisan partner paterfamilias pathfinder patriarch patron peach pearl peacekeeper peacemaker peer percipient perfectibilian perfectibilist perfectionist performer personality persophile pet phenom phenomenon philalethist philanthropist philomath philogynist philonoist philosopher pigsney pilot pioneer pinnacle pinup pistol planner player playmate plum pluviophile poet polymath pogonophile possessor postulant potentate powerhouse preceptor premier presence presenter president prevailer primogenitor prince princess principal pro proconsul procreator proctor prodigy producer professional professor progeny progenitor promoter promulgator prophet propitiator proponent proposer proprietor protagonist protean protector provider publisher purist purveyor qualtagh raconteur raconteuse reacher receiver recipient redeemer reliever regulator rejoicer representative researcher resolver resource retrophile rewarder romantic romeo rooter ruler runner russophile sage saint saver saviour savant schatzi scholar scholarch scion scripter sculptor seeker sentinel servant server sharpy shaver sinophile sire sister skipper smoothie soul sovereign specialist sponsor sprite sprout squire standard star stipendiary strategist socializer socius solon something specialist stabilizer staker steward stipendiary stripling striver student stylist success successor sugar suitor superintendent superior superman superstar superwoman supervisor supplier support supporter surety survivor swain sweetheart tadpole teacher teammate technophile testator thalassophile thaumatologist theodidact theotokos thinker titleholder tootsie tot trailblazer trainer treasure trier trustee turophile tutelary tutor tycoon typhlophile underwriter upholder urchin validator valedictorian vaulter victor victress victrix videophile viscount vip visitor visionary virtuoso volunteer votary warantee warantor warden wellspring whip whippersnapper whiz whizz wife winner wizard wonder wooer wordsmith workhorse workmate worshiper writer wunderkind youngster younker youth xenophile'.split(' '));
+  const names = new Set(
+    'acceptor ace achiever adept adherent admirer adorer adviser advisor advocate aesthete aid aide alannah ally altruist agent amoret angel apostle arbiter artisan artist artiste aspirant asset assignee assigner athlete author baby backbone backer backup baron beatus beauty begetter being believer belle benefit bestower bigwig biophile blessing boss booster brain brother bud buddy buff builder captain carer catalyst cause chair champ champion chaperon charmer cherub chief chieftan child chum clerisy climber cohort coiner composer comrade confrere consoler consul convive counsel count creator credit crew cub curator cynosure dad dancer darling daughter dean dear defender designer devisee devisor devotee digerati dilly director disciple doer doll donee donor doozy doula doyen doyenne duke dynamo earl ecstatic einstein elder employer endorser engineer enophile ensurer epicure epitome escort essence example exec exemplar expert exponent family fan fancier fireball fireman flame folks foodie force foreman foreseer founder fount fountain friend gem genius gift givee giver godsend gourmet governor grandee grantee grantor guardian guest guide guru handler head heart height heir heiress help helper helpmate hero heroine hit hopeful host hotshot husband icon ideal idol idolizer infant innocent inspirer intimate inventor invitee inviter keeper key kingpin knight lady lamb laureate lead leader legatee legator legend liberal livewire lord lover lulu luminary maestro magician maker manager marquess marquis marvel master mediator mentor minder miracle mate model mom monitor moppet mother motor mover nabob neophile neonate neoteric nestling newborn nipper nobleman nonesuch notable nurse nursling nurturer officer official omnist operator optimist original overseer owner pacifier pal paladin pangloss paradigm paragon pard parent partisan partner patron peach pearl peer pet phenom pigsney pilot pioneer pinnacle pinup pistol planner player playmate plum poet polymath premier presence prince princess pro proctor prodigy producer progeny promoter prophet proposer protean provider purist purveyor qualtagh reacher receiver redeemer reliever rejoicer resolver resource rewarder romantic romeo rooter ruler runner sage saint saver saviour savant schatzi scholar scion scripter sculptor seeker sentinel servant server sharpy shaver sire sister skipper smoothie soul sponsor sprite sprout squire standard star socius solon staker steward striver student stylist success sugar suitor superior superman supplier support surety survivor swain tadpole teacher teammate testator thinker tootsie tot trainer treasure trier trustee tutelary tutor tycoon upholder urchin vaulter victor victress victrix viscount vip visitor virtuoso votary warantee warantor warden whip whiz whizz wife winner wizard wonder wooer workmate writer younker youth'
+      .split(' ')
+  );
   const playerMap = new Map<Session['id'], Player>();
   
-  const play = playFn({
-    
-    rollback: inp => logger.log({
-      $$: 'timeStep.rollback',
-      replayEvents: inp.replayEvents.length,
-      snapshotsDiscarded: inp. snapshotsDiscarded
-    }),
-    
-    tick: inp => (inp.elapsedMs > 8) && logger.log({ $$: 'timeStep.tick', ...inp })
-    
-  });
+  const play = playFn({ observe: {
+    tick: inp => (inp.elapsedPms > 8) && logger.log({ $$: 'timeStep.tick', ...inp[cl.map](v => Math.round(v)) })
+  }});
+  play.setPatienceMs(160);
   
   const launchData = {
     ...play,
@@ -55,7 +54,8 @@ export default async (inp: { debug: boolean, logger: Logger, jsfnImport: any, se
       }
       
     },
-    players: playerMap
+    players: playerMap,
+    webAssets: localData.webAssets ?? null
   };
   
   sessionKeeper.launch = session => {
@@ -115,4 +115,43 @@ export default async (inp: { debug: boolean, logger: Logger, jsfnImport: any, se
   
   return launchData;
   
-};
+}) satisfies PlatformLaunchFn<LocalData, any>;
+
+export const invokeFn = (async inp => {
+  
+  // Consider trusted `utcMs` vs untrusted `inp.ms`...
+  
+  if (inp.channel.type === 'http') return { $http: (() => {
+    
+    if (!inp.launchData.webAssets) return { code: 500, body: 'web assets not available' };
+    
+    if (inp.channel.path === '/')       return inp.launchData.webAssets.html;
+    if (inp.channel.path === '/script') return inp.launchData.webAssets.js;
+    
+    return { code: 404, body: 'missing' };
+    
+  })() };
+  
+  const { utcMs: serverUtcMs, launchData, session, inp: gameInp } = inp;
+  
+  if (!session) throw Error('session missing');
+  if (!((v): v is Play.ClientEvent & { op: 'player.key', id: string } => cl.isCls(v, Object) && v.op === 'player.key')(gameInp)) return null;
+  
+  // All timestamps below are relative to the TimeStep, i.e. to `ticker.startUtcMs`
+  const { id, ms: clientMs, ...props } = gameInp;
+  
+  const clientLatencyToleranceMs = 150;
+  const player = launchData.players.get(session.id)!;
+  const serverMs = serverUtcMs - launchData.ticker.startUtcMs;
+  const ms = Math.max(Math.min(clientMs, serverMs), serverMs - clientLatencyToleranceMs); // Declared-late events are snapped to the present; declared-early events are tolerated within a certain threshold
+  
+  const event = { ...props, ms, session: { id: player.session.id } };
+  launchData.addEventAndBroadcast(
+    player,
+    event,
+    evt => ({ ...evt, ack: { id, clientMs, serverMs, resolvedMs: ms } })
+  );
+  
+  return null;
+  
+}) satisfies PlatformInvokeFn<any, Awaited<ReturnType<typeof launchFn>>>;;

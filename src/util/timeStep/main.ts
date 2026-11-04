@@ -13,6 +13,28 @@ export type Flow = {
   sc: number  // Simply to `ms / 1000`
 };
 
+export class StepPerf {
+  
+  advanceMs: number;
+  subticks: number;
+  relChecks: number;
+  
+  constructor(inp = { advanceMs: 0, subticks: 0, relChecks: 0 }) {
+    this.advanceMs = inp.advanceMs;
+    this.subticks = inp.subticks;
+    this.relChecks = inp.relChecks;
+  }
+  
+  add(inp: { advanceMs: number, subticks: number, relChecks: number }) {
+    return new StepPerf({
+      advanceMs: this.advanceMs + inp.advanceMs,
+      subticks: this.subticks + inp.subticks,
+      relChecks: this.relChecks + inp.relChecks
+    });
+  }
+  
+};
+
 export type RelationCfg<S extends State, Rel extends Relation> = {
   
   // binary search size - relation timing is precise within `1 / (2 ** quality)` ticks
@@ -23,20 +45,23 @@ export type RelationCfg<S extends State, Rel extends Relation> = {
 };
 export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, Rel extends Relation> = {
   
-  registry: Reg,
-  msPerTick: number,             // Conversion ratio from timestep ticks to real milliseconds
-  minMsPerTick?: number,         // Prevents bisections that would result in less than this time elapsing in a subframe
-  maxEventsPerSnapshot?: number, // Causes snapshots to roll over when they hit this limit
-  maxSnapshotsToStore?: number,  // Causes older snapshots to be discarded
-  seed: string | number,
-  state: S,
-  eventOrder?: (evt0: E, evt1: E) => '=' | '<' | '>',
-  advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S,
+  registry:              Reg,
+  msPerTick:             number,          // Conversion ratio from timestep ticks to real milliseconds
+  minMsPerTick?:         number,          // Prevents bisections that would result in less than this time elapsing in a subframe
+  maxSnapshots?:         number,          // Causes older snapshots to be discarded
+  maxSnapshotEvents?:    number,          // Causes snapshots to roll over when they hit this limit
+  maxSnapshotDurMs?:     number,          // Cut over snapshots when a snapshot becomes too long
+  seed:                  string | number, // Random seed
+  state:                 S,
+  
+  // Comparison function to determine which of two events comes first
+  eventOrder?:           (evt0: E, evt1: E) => '=' | '<' | '>',
+  
+  // Function which mutates state in response to an event
+  advance:               (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S,
+  
+  // Configuration for how to detect state relationships over time
   relationCfg?: null | RelationCfg<S, Rel>,
-  signals?: {
-    rollback?: (inp: { replayEvents: E[], snapshotsDiscarded: number }) => void,
-    tick?:     (inp: { requestedTicks: number, subticks: number, relChecks: number, elapsedMs: number }) => void
-  }
   
 };
 export class TimeStep<Reg extends Registry, S extends State, E extends Event, Rel extends Relation> {
@@ -111,19 +136,19 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   };
   
   protected wire: Wire<Reg>;
-  protected maxEventsPerSnapshot: number;
-  protected maxSnapshotsToStore: number;
+  protected maxSnapshots: number;
+  protected maxSnapshotEvents: number;
+  protected maxSnapshotDurMs: number;
   protected msPerTick: number;
   protected tickPerMs: number;
   protected minMsPerTick: number;
   protected scPerTick: number;
   protected historyForgetSize: number;
-  protected snapshots: { rng: Rng, tick: number, historyInd: number, numEvents: number, state: S }[];
-  protected history: (E & { tick: number })[];
+  protected snapshots: { rng: Rng, headTick: number, tick: number, historyInd: number, numEvents: number, state: S }[];
+  protected history: E[]; // The consumer's own objects, by identity - consumers must never mutate events they feed in
   protected advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S;
   protected eventOrder: (src: E, trg: E) => '=' | '<' | '>';
   protected relationCfg: null | RelationCfg<S, Rel>;
-  protected signals?: TimeStepInp<Reg, S, E, Rel>['signals'];
   
   constructor(inp: TimeStepInp<Reg, S, E, Rel>) {
     
@@ -132,16 +157,17 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     this.tickPerMs = 1 / this.msPerTick;
     this.minMsPerTick = inp.minMsPerTick ?? 0;
     this.scPerTick = inp.msPerTick * 0.001;
-    this.maxEventsPerSnapshot = inp.maxEventsPerSnapshot ?? 500;
-    this.maxSnapshotsToStore = inp.maxSnapshotsToStore ?? 50;
+    this.maxSnapshots = inp.maxSnapshots ?? 50;
+    this.maxSnapshotEvents = inp.maxSnapshotEvents ?? 500;
+    this.maxSnapshotDurMs = inp.maxSnapshotDurMs ?? Infinity;
     
     const seed = cl.isCls(inp.seed, String)
       ? inp.seed.split('').reduce((m, v, n) => m + (n + 1) * v.charCodeAt(0), 0)
       : inp.seed;
     
     this.snapshots = [
-      { tick: -1, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Fallback snapshot - preserves the initial state
-      { tick:  0, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Live snapshot head
+      { headTick: -1, tick: -1, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Fallback snapshot - preserves the initial state
+      { headTick: -1, tick:  0, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Live snapshot head
     ];
     this.history = [];
     this.historyForgetSize = 0;
@@ -149,154 +175,28 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     this.eventOrder = inp.eventOrder ?? TimeStep.eventOrder;
     this.relationCfg = inp.relationCfg ?? null;
     
-    if (inp.signals?.rollback) (this.signals ??= {}).rollback = inp.signals.rollback;
-    
-    if (inp.signals?.tick) {
-      
-      (this.signals ??= {}).tick = inp.signals.tick;
-      
-      const origSetTick = this.setTick;
-      Object.assign(this, { setTick: (tick: number) => {
-        
-        const requestedTicks = tick - this.snapshots.at(-1)!.tick;
-        const now = Date.now();
-        
-        const r = origSetTick.call(this, tick);
-        
-        const elapsedMs = Date.now() - now;
-        this.signals!.tick!({
-          elapsedMs,
-          requestedTicks,
-          ...r
-        });
-        
-        return r;
-        
-      }});
-      
-    }
-    
   }
   
   protected getFlow(tick: number): Flow { return { tick, ms: tick * this.msPerTick, sc: tick * this.scPerTick }; }
   
-  protected setTickOld(tick: number) {
-    
-    const snap = this.snapshots.at(-1)!;
-    const { find, quality } = this.relationCfg ?? { quality: 0, find: () => [] };
-    const stepTicks = this.relationCfg ? 1 : Infinity; // Without relations there's nothing to resolve between events
-    
-    let subticks = 0;
-    let relChecks = 0;
-    const getRelCheck = (headTick: number, tailTick: number, last?: Rel[]) => {
-      relChecks++;
-      
-      const headMs = headTick * this.msPerTick;
-      const tailMs = tailTick * this.msPerTick;
-      
-      const freeRels: (Rel & { ms?: undefined })[] = [];
-      const timeRels: (Rel & { ms:  number    })[] = [];
-      for (const rel of find(this.getFlow(tailTick), snap.state, last ?? null)) {
-        if (rel.ms == null)                       { freeRels.push(rel as Rel & { ms?: undefined }); continue; }
-        if (rel.ms >= headMs && rel.ms <= tailMs) { timeRels.push(rel as Rel & { ms:  number    }); continue; } // Really if `find` produced tick rels outside our search window, it's considered poorly behaved...
-      }
-      
-      return {
-        tick: tailTick,
-        freeRels,
-        timeRels: timeRels.sort((a, b) => a.ms - b.ms),
-        totalRels: freeRels.length + timeRels.length
-      };
-      
-    };
-    
-    while (snap.tick < tick) {
-      
-      subticks++;
-      
-      const blindNextTick = (Math.floor(snap.tick / stepTicks) + 1) * stepTicks; // The next tick-aligned step to snap to
-      const naiveNextTick = Math.min(blindNextTick, tick);                       // Takes into account overshooting the requested `tick` inp
-      
-      let relCheck = getRelCheck(snap.tick, naiveNextTick);
-      
-      // Binary-search the window to find earliest moment free relations occurred
-      let windowHeadTick = snap.tick;
-      let windowTailTick = naiveNextTick;
-      for (let i = 0; i < quality; i++) {
-        
-        if (relCheck.freeRels.length === 0) break; // The binary search is only useful for rels with unknown timing
-        
-        const windowMid = (windowHeadTick + windowTailTick) * 0.5;
-        const earlierRelCheck = getRelCheck(snap.tick, windowMid, [ ...relCheck.freeRels, ...relCheck.timeRels ]); // Are there still relations at the range's midpoint? Does it make sense to pass tick rels here??
-        if (earlierRelCheck.freeRels.length) {
-          
-          const earlierMsAdvance = (earlierRelCheck.tick - snap.tick) * this.msPerTick;
-          if (earlierMsAdvance < this.minMsPerTick) break;
-          
-          // There are still relations at the midpoint! Update to these earlier relations, prepare
-          // to check even earlier (the earlier half of the remaining range)
-          relCheck = earlierRelCheck;
-          windowHeadTick = earlierRelCheck.tick;
-          
-        } else {
-          
-          // No relations found at the midpoint - prepare to check later (the later half of the
-          // remaining range)
-          windowTailTick = earlierRelCheck.tick;
-          
-        }
-        
-      }
-      
-      // Finally produce a "rel" event for the earliest moment any relations occurred
-      if (relCheck.totalRels) {
-        
-        const { tick, rels } = (() => {
-          
-          const { freeRels, timeRels } = relCheck;
-          if (relCheck.freeRels) return { tick: relCheck.tick, rels: [ ...freeRels, ...timeRels ] };
-          
-          // Get the prefix of simulatenous events
-          const ms0 = timeRels[0].ms;
-          let ind = 1;
-          while ((timeRels[ind]?.ms ?? null) === ms0) ind++;
-          
-          return { tick: ms0 * this.tickPerMs, rels: timeRels.slice(0, ind) };
-          
-        })();
-        
-        snap.state = this.advance(
-          snap.state,
-          { ...this.getFlow(tick), op: 'timeStep.rel' as const, rels },
-          snap.rng,
-          this.wire.registry
-        ) ?? snap.state;
-        
-      }
-      
-      snap.tick = relCheck.tick;
-      
-    }
-    
-    snap.tick = tick; // Set exactly to eliminate any floating point noise
-    
-    return { subticks, relChecks };
-    
-  }
-  
   protected setTick(requestedTick: number) {
     
-    const snap = this.snapshots.at(-1)!;
+    // Processes all ticks up until `requestedTick`, and advances any relations in the timeframe
+    
+    let snap = this.snapshots.at(-1)!;
+    
+    const sp = new StepPerf();
+    if (requestedTick < snap.tick) return sp;
+    
     const { find, quality } = this.relationCfg ?? { quality: 0, find: () => [] };
     const stepTicks = this.relationCfg ? 1 : Infinity; // With no relations, there's no action at all between events
     
-    let subticks = 0;
-    let relChecks = 0;
+    sp.advanceMs = (requestedTick - snap.tick) * this.msPerTick;
     const getRelCheck = (headTick: number, tailTick: number, lastFreeRels?: Rel[]) => {
       
       // Given a time window, find relations at the end of that window
       
-      relChecks++;
+      sp.relChecks++;
       
       const headMs = headTick * this.msPerTick;
       const tailMs = tailTick * this.msPerTick;
@@ -354,12 +254,18 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       
     };
     
+    // Return the tick at which `snap`'s time window expires
+    const windowTailTick = () => Math.ceil(snap.headTick + this.maxSnapshotDurMs * this.tickPerMs);
+    
     while (snap.tick < requestedTick) {
       
-      subticks++;
+      sp.subticks++;
+      
+      // Bound snapshot length even when no events arrive
+      if (snap.tick >= windowTailTick()) snap = this.snapshotCutover(snap);
       
       const blindNextTick = (Math.floor(snap.tick / stepTicks) + 1) * stepTicks; // The next integer tick to step to
-      const naiveNextTick = Math.min(blindNextTick, requestedTick);              // Takes into account overshooting the requested `tick` inp
+      const naiveNextTick = Math.min(blindNextTick, requestedTick, windowTailTick()); // Takes into account overshooting the requested `tick` and snapshot window
       
       // Check for a discontinuity in the advancement window
       const relCheck = getRelCheck(snap.tick, naiveNextTick);
@@ -384,7 +290,27 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     
     snap.tick = requestedTick; // Set exactly to eliminate any floating point noise
     
-    return { subticks, relChecks };
+    return sp;
+    
+  }
+  
+  protected rollback(tick: number) {
+    
+    // Find the first snapshot SN prior to `tick`; all later snapshots are deleted and will be
+    // reconstructed; returns all events beginning with the 1st event after SN's window, which the
+    // caller must replay
+    const stableSnapInd = this.snapshots.findLastIndex(snp => tick > snp.tick); // The 1st snapshot that is unaffected by changes at `tick`
+    if (stableSnapInd === -1) throw Error('rollback exceeds retention')[cl.mod]({ tick });
+    
+    const stableSnap = this.snapshots[stableSnapInd];
+    
+    const replayEventInd = stableSnap.historyInd + stableSnap.numEvents - this.historyForgetSize;
+    const replayEvents = this.history.slice(replayEventInd);
+    
+    this.snapshots = this.snapshots.slice(0, stableSnapInd + 1); // Maintain all snapshots up to and including the stable snapshot; discard the rest
+    this.history = this.history.slice(0, replayEventInd);
+    
+    return replayEvents;
     
   }
   
@@ -394,104 +320,151 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     // relation within these steps is precisely narrowed down and resolved first. The current
     // snapshot's `msTailInc` tracks overall advancement. Finally, advance by that event.
     
-    const evt = Object.assign(this.wire.clone(inp), { tick: inp.ms / this.msPerTick }); // TODO: wire clone is necessary? can we just do `{}[cl.merge](inp)`? Or even `{ ...inp }`? That retains arrays by identity so maybe some aliasing funkiness???
+    const pms = performance.now();
+    const evt = inp;
+    const evtTick = evt.ms / this.msPerTick;
     
     const snapshotTick = this.snapshots.at(-1)!.tick;
     
     // Processing `evt` may require reprocessing earlier events - determine all events to process
-    const eventsToPlay = ((): (E & { tick: number })[] => {
+    const eventsToPlay = ((): E[] => {
       
       // If the event occurs beyond the current snapshot window it can be cleanly added
-      if (evt.tick > snapshotTick) return [ evt ];
+      if (evtTick > snapshotTick) return [ evt ];
       
       // It's possible the event is within the snapshot window, with identical timing to the latest
       // event in that window, but overall later ordering (based on json comparison) - in this case
       // `evt` can also be cleanly added
       if (true
-        && evt.tick === snapshotTick
+        && evtTick === snapshotTick
         && this.history.length
         && this.eventOrder(evt, this.history.at(-1)!) === '>'
       ) return [ evt ];
       
       // At this point `evt` preceeds some existing events - rollback is needed...
-      
-      // Find the first snapshot SN prior to `evt`; all later snapshots are deleted and will be
-      // reconstructed; replay all events beginning with the 1st event after SN's window
-      const stableSnapInd = this.snapshots.findLastIndex(snp => evt.tick > snp.tick); // The 1st snapshot that is unaffected by the incoming event
-      const stableSnap = this.snapshots[stableSnapInd];
-      
-      const replayEventInd = stableSnap.historyInd + stableSnap.numEvents - this.historyForgetSize;
-      const replayEvents = this.history.slice(replayEventInd);
-      
-      if (globalThis.zzz) console.log('ROLLBACK - replay count: ' + replayEvents.length.toString(10));
+      const replayEvents = this.rollback(evtTick);
       
       let insertInd = 0;
       while (insertInd < replayEvents.length && this.eventOrder(replayEvents[insertInd], evt) !== '>') insertInd++;
-      
-      this.signals?.rollback?.({
-        replayEvents,
-        snapshotsDiscarded: this.snapshots.length - (stableSnapInd + 1)
-      });
-      
-      this.snapshots = this.snapshots.slice(0, stableSnapInd + 1); // Maintain all snapshots up to and including the stable snapshot; discard the rest
-      this.history = this.history.slice(0, replayEventInd);
       
       return [ ...replayEvents.slice(0, insertInd), evt, ...replayEvents.slice(insertInd) ];
       
     })();
     
-    // Now `eventsToPlay` is an ordered array of events suffixing `this.history`
-    for (const evt of eventsToPlay) {
+    const stats = this.playEvents(eventsToPlay);
+    
+    // We've only advanced time up until `evtTick` - if the snapshot had extended further, we need
+    // to readvance to that time
+    if (this.snapshots.at(-1)!.tick < snapshotTick) {
+      const ticked = this.setTick(snapshotTick);
+      stats.subticks += ticked.subticks;
+      stats.relChecks += ticked.relChecks;
+    }
+    
+    return {
+      elapsedPms: Math.round(performance.now() - pms),
+      numEvents: eventsToPlay.length,
+      ...stats,
+    };
+    
+  }
+  
+  public replaceEvent(old: E, next: null | E) {
+    
+    // Retracts `old` (matched by identity) and inserts `next` wherever it belongs in the event
+    // ordering - which may differ from `old`'s position - with a single rollback
+    
+    const snapshotTick = this.snapshots.at(-1)!.tick;
+    const oldTick = old.ms / this.msPerTick;
+    const nextTick = next ? next.ms / this.msPerTick : Infinity;
+    
+    if (!this.history.includes(old)) throw Error('event missing')[cl.mod]({ event: old }); // Must be checked before `rollback` mutates anything
+    
+    const replayEvents = this.rollback(Math.min(oldTick, nextTick));
+    const oldInd = replayEvents.lastIndexOf(old);
+    if (oldInd === -1) throw Error('event missing')[cl.mod]({ event: old });
+    const eventsToPlay = [ ...replayEvents.slice(0, oldInd), ...replayEvents.slice(oldInd + 1) ];
+    
+    if (next) {
+      let insertInd = 0;
+      while (insertInd < eventsToPlay.length && this.eventOrder(eventsToPlay[insertInd], next) !== '>') insertInd++;
+      eventsToPlay.splice(insertInd, 0, next);
+    }
+    
+    const stats = this.playEvents(eventsToPlay);
+    
+    if (this.snapshots.at(-1)!.tick < snapshotTick) {
+      const t = this.setTick(snapshotTick);
+      stats.advanceMs += t.advanceMs;
+      stats.relChecks += t.relChecks;
+      stats.subticks += t.subticks;
+    }
+    
+    return stats;
+    
+  }
+  
+  protected snapshotCutover(curSnap = this.snapshots.at(-1)!) {
+    
+    const nextSnap = {
+      rng:       curSnap.rng.clone(),
+      headTick:  curSnap.tick,
+      tick:      curSnap.tick,
+      historyInd: this.historyForgetSize + this.history.length,
+      numEvents: 0,
+      state:     this.wire.clone(curSnap.state)
+    };
+    this.snapshots.push(nextSnap);
+    
+    if (this.snapshots.length > this.maxSnapshots) {
       
-      const snap = (() => {
-        
-        const curSnap = this.snapshots.at(-1)!;
-        
-        // The initial snapshot always serves as fallback; it's never used as the active snapshot
-        if (curSnap !== this.snapshots[0] && curSnap.numEvents < this.maxEventsPerSnapshot) return curSnap;
-        
-        // Note we can't blindly terminate a snapshot at its max events - we must also ensure the
-        // incoming event doesn't perfectly coincide with the latest snapshot event; if it does
-        // coincide it would be flawed to stack it onto the next snapshot, whose time range has no
-        // overlap with the current snapshot!
-        // TODO: just ignore (or reject) duplicate events?
-        if (this.history.length && this.eventOrder(evt, this.history.at(-1)!) === '=') return curSnap;
-        
-        const nextSnap = {
-          rng:       curSnap.rng.clone(),
-          tick:      curSnap.tick,
-          historyInd: this.historyForgetSize + this.history.length,
-          numEvents: 0,
-          state:     this.wire.clone(curSnap.state)
-        };
-        this.snapshots.push(nextSnap);
-        
-        if (this.snapshots.length > this.maxSnapshotsToStore) {
-          
-          // Consider: maybe there's a smart way to have a denser presence of snapshots closer to
-          // the present, with fewer further in the past???
-          const forgetSnapshot = this.snapshots.shift()!;
-          this.historyForgetSize += forgetSnapshot.numEvents;
-          this.history = this.history.slice(forgetSnapshot.numEvents); // TODO: inefficient? consider linked-list for history??
-          
-        }
-        
-        return nextSnap;
-        
-      })();
+      const forgetSnapshot = this.snapshots.shift()!;
+      this.historyForgetSize += forgetSnapshot.numEvents;
+      this.history = this.history.slice(forgetSnapshot.numEvents); // TODO: inefficient? consider linked-list for history??
       
-      this.setTick(evt.tick); // Note this can introduce relational discontinuities
+    }
+    
+    return nextSnap;
+    
+  }
+  
+  protected playEvents(events: E[]) {
+    
+    // `events` is an ordered array of events suffixing `this.history`
+    const sp = new StepPerf();
+    let tick0 = this.snapshots.at(-1)!.tick;
+    for (const evt of events) {
       
+      const curSnap = this.snapshots.at(-1)!;
+      
+      // The initial snapshot always serves as fallback; it's never used as the active snapshot
+      const full = false
+        || curSnap === this.snapshots[0]
+        || curSnap.numEvents                                  >= this.maxSnapshotEvents
+        || (curSnap.tick - curSnap.headTick) * this.msPerTick >= this.maxSnapshotDurMs;
+      
+      // Note we can't blindly terminate a snapshot at its max events - we must also ensure the
+      // incoming event doesn't perfectly coincide with the latest snapshot event; if it does
+      // coincide it would be flawed to stack it onto the next snapshot, whose time range has no
+      // overlap with the current snapshot!
+      // TODO: just ignore (or reject) duplicate events?
+      const duplicate = this.history.length > 0 && this.eventOrder(evt, this.history.at(-1)!) === '=';
+      
+      if (full && !duplicate) this.snapshotCutover();
+      
+      const playTick = evt.ms / this.msPerTick;
+      sp.add(this.setTick(playTick)); // Note this can introduce relational discontinuities, and push snapshots
+      
+      const snap = this.snapshots.at(-1)!;
       this.history.push(evt);
       snap.numEvents++;
-      snap.tick = evt.tick;
+      snap.tick = playTick;
       snap.state = this.advance(snap.state, evt, snap.rng, this.wire.registry) ?? snap.state;
       
     }
     
-    // We've only advanced time up until `evt.tick` - if the snapshot had extended further, we need
-    // to readvance to that time
-    if (this.snapshots.at(-1)!.tick < snapshotTick) this.setTick(snapshotTick);
+    sp.advanceMs = (this.snapshots.at(-1)!.tick - tick0) * this.msPerTick;
+    return sp;
     
   }
   
@@ -528,6 +501,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     this.historyForgetSize = 0;
     this.snapshots = [{
       rng: new Rng(snap.rng.state),
+      headTick: snap.tick,
       tick: snap.tick,
       historyInd: 0,
       numEvents: 0,

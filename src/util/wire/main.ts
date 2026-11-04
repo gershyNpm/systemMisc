@@ -47,6 +47,7 @@ export class Wire<Reg extends Registry> {
     if (val === -Infinity) return { [Wire.opKey]: 'num:-inf' };
     
     const Cls = cl.getCls(val);
+    if ([ undefined, null, Boolean, Number, String ][cl.has](Cls)) return val as Json;
     
     if (Cls === Object) {
       const obj = (val as Obj<WireData>)[cl.map](val => this.encode({ val, heap, seen }).ind);
@@ -58,8 +59,6 @@ export class Wire<Reg extends Registry> {
     if (Cls === Array) {
       return (val as Obj<WireData>)[cl.map](val => this.encode({ val, heap, seen }).ind);
     }
-    
-    if ([ undefined, null, Boolean, Number, String ][cl.has](Cls)) return val as Json;
     
     Error[cl.assert]({ registry: this.registry, Cls }, ({ registry, Cls }) => {
       return cl.isCls(Cls.clsName, String) && registry[cl.has](Cls.clsName);
@@ -156,10 +155,41 @@ export class Wire<Reg extends Registry> {
     
   }
   
-  public clone<Wd extends WireData>(val: Wd) {
+  public clone<Wd extends WireData>(val: Wd, seen = new Map<WireData, WireData>()) {
     
-    // TODO: This can probably be more efficient - no need for the intermediate heap representation
-    return this.decode(this.encode({ val })) as Wd;
+    // return this.decode(this.encode({ val })) as Wd; // This works but is inefficient; unnecessary intermediate heap representation
+    
+    const Cls = cl.getCls(val);
+    if ([ undefined, null, Boolean, Number, String ][cl.has](Cls)) return val;
+    
+    if (seen.has(val)) return seen.get(val);
+    
+    if (Cls === Object) {
+      const obj = {};
+      seen.set(val, obj);
+      for (const k in val as Obj<WireData>) obj[k] = this.clone((val as Obj<WireData>)[k], seen);
+      return obj;
+    }
+    
+    if (Cls === Array) {
+      const len = (val as WireData[]).length;
+      const arr = new Array(len);
+      seen.set(val, arr);
+      for (let i = 0; i < len; i++) arr[i] = this.clone((val as WireData[])[i], seen);
+      return arr;
+    }
+    
+    Error[cl.assert]({ registry: this.registry, Cls }, ({ registry, Cls }) => {
+      return cl.isCls(Cls.clsName, String) && registry[cl.has](Cls.clsName);
+    });
+    
+    const wd = new Cls(Wire.dummyParam);
+    seen.set(val, wd);
+    
+    const enc = this.clone((val as BaseCls).encode());
+    Object.assign(wd, new Cls(enc));
+    
+    return wd;
     
   }
   

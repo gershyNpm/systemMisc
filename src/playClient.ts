@@ -2,8 +2,7 @@ import '@gershy/clearing';
 import { PollenSession } from '@gershy/lilac-platformer/main/pollenSession';
 import Logger from '@gershy/logger';
 import { Draw } from './util/draw.ts';
-import type { Platform } from '@gershy/lilac-platformer';
-import playFn, { type Play } from './play.ts';
+import playFn, { Flow, type Play } from './play.ts';
 import { Pt } from './util/pt.ts';
 
 export namespace Browser {
@@ -46,9 +45,8 @@ export namespace Browser {
       (term: 'error',              fn: (evt: { error: any }) => any): void,
       (term: 'unhandledrejection', fn: (evt: { reason: any }) => any): void,
     },
-    performance: {
-      timeOrigin: number,
-      now: () => number
+    location: {
+      hostname: `${string}.${string}`
     }
   };
   
@@ -63,20 +61,43 @@ export default async () => {
   // [ ] Still a lot of todos in Platformer (priority concern: admin-over-non-tls-http)
   
   type BrowserInp = {
-    platform: Omit<Platform, '!adminPass'>
+    platform: {
+      ipHost: 'self' | `${string}.${string}`,
+      dnsHost: null | 'self' | `${string}.${string}`
+    }
   };
   
-  Object.assign(globalThis, { process: {}, global: globalThis, zzz: true }); // TODO: ZZZ Really should avoid using these references anywhere... they're nodejs-only!
+  // TODO: ZZZ code everywhere must avoid `process` and `global` - they're nodejs-only!
+  const browser: Browser.Window = Object.assign(globalThis, { process: {}, global: globalThis, zzz: true }) as any;
   
   const logger = new Logger('browser', {}, { maxStrLen: 1000 }, (ctx: any) => {
+    
+    const now = performance.now();
+    const time = (() => {
+      
+      let t = now;
+      const hours = Math.floor(now / (1000 * 60 * 60));
+      t -= hours * 1000 * 60 * 60;
+      
+      const mins = Math.floor(now / (1000 * 60));
+      t -= mins * 1000 * 60;
+      
+      const secs = Math.floor(now / 1000);
+      t -= secs * 1000;
+      
+      return [ hours, mins, secs ]
+        .map(v => v.toString(10).padStart(2, '0'))
+        .join(':');
+      
+    })();
     
     const { $, msg, ...more } = ctx;
     const hasMore = !more[cl.empty]();
     console.log(
       
       ...(msg
-        ? [ `%c ${$.$}\n%c ${msg}${hasMore ? '\n' : ''}` ]
-        : [ `%c ${$.$}${''      }${hasMore ? '\n' : ''}` ]
+        ? [ `%c ${time}: ${$.$}\n%c ${msg}${hasMore ? '\n' : ''}` ]
+        : [ `%c ${time}: ${$.$}${''      }${hasMore ? '\n' : ''}` ]
       ),
       
       'font-weight: bold;',
@@ -88,43 +109,47 @@ export default async () => {
     
   });
   
+  let pingMs = 50;
+  let connected = false;
   await logger.scope(null, {}, async logger => {
     
-    let nowOffMs = 0;
-    const clientNow = (now = Date.now()) => {
+    // Timing functions
+    let clientOffMs = 0;
+    const { perfUtcMs, clientUtcMs, inputUtcMs } = (() => {
       
-      // Replacement for `Date.now()` intended to be continuously calibrated so that client ms
-      // queries correspond as closely as possible to server ms
-      // (TODO: use `performance` for more precision?)
+      const { timeOrigin } = performance;
+      const perfUtcMs = () => timeOrigin + performance.now();
       
-      return now += nowOffMs;
+      const clientUtcMs = (now = perfUtcMs()) => {
+        
+        // Replacement for `Date.now()` intended to be continuously calibrated so that client ms
+        // queries correspond as closely as possible to server ms
+        // (TODO: use `performance` for more precision?)
+        
+        return now += clientOffMs;
+        
+      };
       
-    };
+      let last = { now: -Infinity, reps: 0 };
+      const inputUtcMs = (now = clientUtcMs()) => {
+        
+        // Returns unique timestamps for inputs / rapid events - closely-spaced calls use
+        // small-decimal-place increments to achieve stable ordering
+        
+        if (now > last.now) last = { now, reps: 0 };
+        return last.now + (last.reps++) * 0.00001;
+        
+      };
+      
+      return { perfUtcMs, clientUtcMs, inputUtcMs };
+      
+    })();
     
-    let last = { now: -Infinity, reps: 0 };
-    const inputNow = (now = clientNow()) => {
-      
-      // Returns timestamps for inputs / rapid events - calls within the same millisecond use a low
-      // decimal place to achieve stable ordering
-      
-      if (now <= last.now) return last.now + (++last.reps) * 0.00001;
-      
-      last = { now, reps: 0 };
-      return now;
-      
-    };
-    
-    const browser = globalThis as any as Browser.Window;
     const errHandler = (err: any) => {
       console.log('TOP LEVEL ERROR', { err });
     };
     browser.addEventListener('error',              evt => errHandler(evt.error));
     browser.addEventListener('unhandledrejection', evt => errHandler(evt.reason));
-    
-    const browserInp: BrowserInp = browser.document.currentScript.src.split('?')[1]
-      .split('&')
-      [cl.toObj](v => v[cl.cut]('=', 1))
-      [cl.map](v => cl.safe(() => JSON.parse(decodeURIComponent(v)), () => v)) as any;
     
     const elems = (() => {
       
@@ -164,7 +189,7 @@ export default async () => {
         color: '#fff',
         pointerEvents: 'none'
       });
-      body.appendChild(status);
+      // body.appendChild(status); // TODO: No longer appending this element... reconsider? It's nice during loading
       
       let statusPrm = Promise.resolve();
       const queueStatus = (text: string) => {
@@ -183,19 +208,40 @@ export default async () => {
     elems.queueStatus('loading session...');
     
     const session = await logger.scope('sessionLaunch', {}, async logger => {
-      const session = new PollenSession({ flowerId: `domain/${browserInp.platform.dnsHost!}` as const });
+      
+      const browserInp: BrowserInp = browser.document.currentScript.src.split('?')[1]
+        .split('&')
+        [cl.toObj](v => v[cl.cut]('=', 1))
+        [cl.map](v => cl.safe(() => JSON.parse(decodeURIComponent(v)), () => v)) as any;
+      
+      const { dnsHost, ipHost } = browserInp.platform;
+      const browserHost = dnsHost ?? ipHost; // Prefer dns host
+      const host = browserHost === 'self'
+        ? browser.location.hostname
+        : browserHost;
+      
+      logger.log({ $$: 'gameConnection', dnsHost, ipHost, resolvedHost: host });
+      
+      const session = new PollenSession({ flowerId: `domain/${host}` as const });
       const { sessionId } = await session.getDef(logger);
       logger.log({ $$: 'result', sessionId });
       return Object.assign(session, { id: sessionId });
+      
     });
+    connected = true;
     
     elems.queueStatus('loaded session!');
     
-    const play = (browser as any).play = playFn();
+    const play = (browser as any).play = playFn({ observe: {
+      
+      tick: inp => (inp.elapsedPms > 8) && logger.log({ $$: 'timeStep.tick', ...inp[cl.map](v => Math.round(v)) })
+      
+    }});
     const stateJoinedPrm = Promise[cl.later]();
     
     // Sokt event processing
-    const myEvts: (Play.ClientEvent & { id: string })[] = [];
+    const inputs: Obj<{ event: Play.Event, pms: number }> = {}; // Local inputs awaiting a server ack, by input id
+    let serverStartUtcMs = 0;
     logger.scope('sokt', {}, async () => {
       
       const hear = await session.hear(logger);
@@ -218,14 +264,15 @@ export default async () => {
       })();
       elems.queueStatus('got state data!');
       
-      const receivedStateDataUtcMs = Date.now();
+      const receivedStateDataUtcMs = perfUtcMs();
       const estimatedLatencyMs = 4;
-      nowOffMs = -receivedStateDataUtcMs + (stateData.utcMs + estimatedLatencyMs);
+      clientOffMs = -receivedStateDataUtcMs + (stateData.utcMs + estimatedLatencyMs);
       
       elems.queueStatus('joining state...');
       play.timeStep.decode(stateData.state as any);
       play.setPendingEvents(stateData.pendingEvents as any);
-      play.setOffsetMs(clientNow(play.ticker.startUtcMs) - stateData.startUtcMs);
+      play.setOffsetMs(clientUtcMs(play.ticker.startUtcMs) - stateData.startUtcMs);
+      serverStartUtcMs = stateData.startUtcMs;
       elems.queueStatus('joined state!');
       stateJoinedPrm.resolve();
       
@@ -234,15 +281,29 @@ export default async () => {
         const { done, value: event } = await hear.next() as { done: boolean, value: Play.AckEvent };
         if (done) break;
         
-        const { ack = null } = event;
-        if (ack) {
-          const corr = myEvts.find(evt => evt.id === ack.id);
-          if (corr) logger.log({ ping: Date.now() - corr.ms, honoured: ack.resolvedUtcMs === ack.clientUtcMs, offsetToServer: ack.serverUtcMs - ack.clientUtcMs });
+        const pms = performance.now();
+        
+        const { ack = null, ...serverEvent } = event;
+        if (!ack) { play.addEvent(event); continue; }
+        
+        const input = inputs[cl.at](ack.id, null);
+        if (input) {
+          delete inputs[ack.id];
+          const inputPingMs = pms - input.pms;
+          pingMs = 0.9 * pingMs + 0.1 * inputPingMs;
         }
         
-        play.addEvent(event);
+        const honoured = ack.resolvedMs === ack.clientMs;
+        const offsetToServer = Math.max(0, Math.round(ack.serverMs - ack.clientMs));
+        if (!honoured) logger.log({ msg: 'event dishonoured', input, honoured, offsetToServer });
+        
+        // An honoured input is already in the timeline exactly as the server resolved it
+        if      (!input)    play.addEvent(serverEvent as Play.Event);
+        else if (!honoured) play.replaceEvent(input.event, serverEvent as Play.Event);
         
       }
+      
+      connected = false;
       
     }).catch(() => logger.log({ $: 'sokt.glitch' }));
     
@@ -280,33 +341,40 @@ export default async () => {
         
         // Event can be delayed due to event loop and other factors - ignore excessively late
         // events as the server will reject them either way!
-        const evtNow = browser.performance.timeOrigin + evt.timeStamp;
+        const evtNow = performance.timeOrigin + evt.timeStamp;
         if (evtNow < (Date.now() - 100)) return;
         
         const btn = actMap[cl.at](evt.code, null);
         if (btn === null) return;
         
+        // Don't resend the same button state (by default key events repeat when held)
         if (btnState[btn] === dir) return;
         btnState[btn] = dir;
         
-        const event: Play.ClientEvent & { id: string } = {
-          ms: inputNow(clientNow(evtNow)),
-          id: Math.random().toString(36).slice(2),
-          op: 'player.key',
-          btn: `${dir}${btn}` as const,
-        };
-        myEvts.push({ ...event, ms: Date.now() });
-        while (myEvts.length > 30) myEvts.shift();
+        const id = Math.random().toString(36).slice(2);
+        const timeStepMs = inputUtcMs(clientUtcMs(evtNow)) - serverStartUtcMs;
         
-        session.tell({ logger, msg: event });
+        // Apply the input locally right away; the server's ack later confirms or replaces it
+        const event: Play.Event = {
+          ms: timeStepMs,
+          op: 'player.key',
+          btn: `${dir}${btn}`,
+          session: { id: session.id }
+        };
+        inputs[id] = { event, pms: performance.now() }
+        play.addEvent(event);
+        
+        session.tell({ logger, msg: { ms: timeStepMs, id, op: event.op, btn: event.btn } });
         
       });
       
     })();
     
     const { Player } = play.registry;
+    const patienceMs = 20;
     const offsetMs = play.getOffsetMs();
     const draw = new Draw({ canvas: elems.canvas });
+    let nextSampleMs = -Infinity;
     while (true) {
       
       await new Promise<void>(r => browser.requestAnimationFrame(r));
@@ -317,27 +385,45 @@ export default async () => {
       if (canvas.width  !== cw) canvas.width  = cw;
       if (canvas.height !== ch) canvas.height = ch;
       
-      const ms = (Date.now() - play.ticker.startUtcMs) + offsetMs;
-      const flow = { ms, sc: ms * 0.001 };
+      const ms = (perfUtcMs() - play.ticker.startUtcMs) + offsetMs - patienceMs;
+      const flow = new Flow(ms);
       
       const stage = play.timeStep.getState().world.getStage(flow);
       const entities = stage.getEntities(flow);
       const player = entities[cl.at](`${Player.clsName}/${session.id}`, null) as null | Play.Registry['Player'];
       
-      const vertMeters = 40;       // Vertical height in meters of viewbox
-      const amtBack = 0.7;          // At 1 the player renders right at the bottom edge of the viewbox; at 0 they render in the middle
+      const debugView = true;
       
-      draw.fresh({ fill: '#400' }, () => {
+      const vertMeters = debugView ? 50 : 25; // Vertical height in meters of viewbox
+      const amtBack = 0.7;                    // At 1 the player renders right at the bottom edge of the viewbox; at 0 they render in the middle
+      
+      draw.fresh({ fill: '#400' }, ({ w, h, mid }) => {
         
         draw.frame(shift => {
           
-          const drawMid = draw.mid();
-          const h = drawMid.y * 2;
-          const off = player
-            ? player.getTransform(flow)
-            : { pos: new Pt({ x: 0, y: 0 }), tur: 0 }; // TODO: midpoint of squad
+          const h = mid.y * 2;
+          const off = player ? player.getTransform(flow) : (() => {
+            
+            let x = 0; let y = 0; let tur = 0;
+            let num = 0;
+            for (let k in entities) {
+              
+              const ent = entities[k];
+              if (!cl.inCls(ent, Player)) continue;
+              
+              const tfm = ent.getTransform(flow);
+              num++;
+              x += tfm.pos.x;
+              y += tfm.pos.y;
+              tur += (tfm.tur % 1);
+              
+            }
+            
+            return { pos: new Pt({ x: x / num, y: y / num }), tur: tur / num };
+            
+          })();
           
-          shift.trn(drawMid);                                  // Relative to center of canvas
+          shift.trn(mid);                                      // Relative to center of canvas
           shift.scl(h / vertMeters);
           shift.trn({ x: 0, y: vertMeters * 0.5 * amtBack });  // Shift focus towards bottom of screen
           shift.tur(-(off.tur + 0.25));
@@ -354,7 +440,13 @@ export default async () => {
           // Render all clipped stuff
           draw.frame(() => {
             
-            draw.clip(() => {
+            // TODO: simply prefixing the rendering with the following allows the clip swept by
+            // player vision to only apply within the specified zone!
+            // draw.clip(() => {
+            //   stage.renderAreaClip(flow, draw); // Clips, e.g., only the interiors of spaces!
+            // });
+            
+            if (!debugView) draw.clip(() => {
               stage.renderClip(flow, draw);
               for (const k in entities) entities[k].renderClip(flow, draw);
             });
@@ -379,7 +471,22 @@ export default async () => {
           
         });
         
+        draw.rect({ pos: new Pt({ x: 65, y: h - 10 }), tur: 0, w: 130, h: 20, fill: '#0004' });
+        draw.text({
+          x: 65, y: h - 7,
+          tur: Math.sqrt(Math.min(0, pingMs - 100) * 0.001),
+          text: connected ? `ping: ${Math.round(pingMs).toString(10)}ms` : 'disconnected! X_X',
+          fontSize: 12,
+          align: '=',
+          fill: '#0dd'
+        });
+        
       });
+      
+      if (ms > nextSampleMs) {
+        nextSampleMs = ms + 30 * 1000;
+        logger.log({ $$: 'flowCacheSample', ...flow.stats });
+      }
       
     }
     

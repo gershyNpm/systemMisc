@@ -23,6 +23,7 @@
     "@gershy/lilac": "^0.0.58",
     "@gershy/lilac-domain": "^0.0.23",
     "@gershy/lilac-platformer": "^0.0.6",
+    "@gershy/nodejs-http-server": "^0.0.2",
     "@gershy/script-bundle": "^0.0.24",
     "@gershy/util-phrasing": "^0.0.21"
   },

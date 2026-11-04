@@ -4,12 +4,29 @@ import { Garden, Soil } from '@gershy/lilac';
 import { Domain } from '@gershy/lilac-domain';
 import type Logger from '@gershy/logger';
 import type { Fact } from '@gershy/disk';
-import playServer from './playServer.ts';
-import type { Play } from './play.ts';
+import { launchFn, invokeFn } from './playServer.ts';
+import { assetGen } from './localInterfaceServer.ts';
 
-export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth }) => {
+export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth, webBundle: boolean }) => {
   
   const { logger, repoFact, auth } = inp;
+  
+  // Bundle web assets into strings
+  const webAssets = await (async () => {
+    
+    if (!inp.webBundle) return null;
+    
+    const [ html, js ] = await Promise.all([
+      assetGen.html({ ipHost: 'self', dnsHost: 'self' }),
+      assetGen.js()
+    ]);
+    
+    inp.logger.log({ $$: 'awsBundledWebAssets', charSizes: { html, js }[cl.map](v => v.body.length) });
+    
+    return { html, js };
+    
+  })();
+  
   const garden = new Garden({
     
     logger,
@@ -31,31 +48,10 @@ export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth 
         domain: new Domain({ addr: 'gershommaes.com', manualConfirmations: { nameServersConnected: true } }),
         certFact: repoFact.par().kid([ '.manager', 'dev', 'cert' ]),
         localData: {
-          state: { terrain: [], players: [] }
+          ...(!webAssets ? {} : { webAssets })
         },
-        launchFn: playServer,
-        invokeFn: async ({ logger, utcMs: serverUtcMs, launchData, session, inp }) => {
-          
-          // Consider trusted `utcMs` vs untrusted `inp.utcMs`...
-          
-          if (!((v): v is Play.ClientEvent & { op: 'player.key', id: string } => cl.isCls(v, Object) && v.op === 'player.key')(inp)) return null;
-          
-          const { id, ms: clientUtcMs, ...props } = inp;
-          
-          const player = launchData.players.get(session.id)!;
-          const utcMs = Math.max(Math.min(clientUtcMs, serverUtcMs), serverUtcMs - 20); // Declared-late events are snapped to the present; declared-early events are tolerated within a certain threshold
-          const ms = utcMs - launchData.ticker.startUtcMs;
-          
-          const event = { ...props, ms, session: { id: player.session.id } };
-          launchData.addEventAndBroadcast(
-            player,
-            event,
-            evt => ({ ...evt, ack: { id, clientUtcMs, serverUtcMs, resolvedUtcMs: utcMs } })
-          );
-          
-          return null;
-          
-        }
+        launchFn,
+        invokeFn
         
       }));
       

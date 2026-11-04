@@ -1,5 +1,5 @@
 import '@gershy/clearing';
-import { assertEqual, testRunner } from '../../../build/utils.test.ts';
+import { assertEqual, cmpFn, hasProps, testRunner } from '../../../build/utils.test.ts';
 import { entry } from '@gershy/entry';
 import { TimeStep } from './main.ts';
 import { Rng } from '../rng.ts';
@@ -33,8 +33,8 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
     return new TimeStep<{}, State, Event, Obj<Json>>({
       registry: {},
       msPerTick: 1000 / 60,
-      maxEventsPerSnapshot: 3,
-      maxSnapshotsToStore,
+      maxSnapshotEvents: 3,
+      maxSnapshots: maxSnapshotsToStore,
       seed: 0,
       state: { stack: [] } as { stack: string[] },
       advance: (state, evt) => {
@@ -155,9 +155,83 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       
     }},
     
+    { name: 'replace event matches fresh processing', fn: async logger => {
+      
+      type Evt = { ms: number, op: 'push', item: string };
+      const getEvents = () => (12)[cl.toArr](i => ({ ms: i, op: 'push' as const, item: String.fromCharCode(97 + i) }));
+      const play = (evts: Evt[]) => {
+        const timeStep = getStackTimestep(); // `maxEventsPerSnapshot: 3` - so there are several snapshot cutovers
+        for (const evt of evts) timeStep.processEvent(evt);
+        return timeStep;
+      };
+      
+      for (let i = 0; i < 12; i++) for (const newMs of [ i - 3.5, i + 0.5, i + 3.5, null ]) {
+        
+        if (newMs !== null && newMs < 0) continue;
+        
+        const events = getEvents();
+        const timeStep = play(events);
+        const next = newMs === null ? null : { ...events[i], ms: newMs };
+        timeStep.replaceEvent(events[i], next);
+        
+        const expected = play([ ...events.filter((e, ind) => ind !== i), ...(next ? [ next ] : []) ]);
+        assertEqual(timeStep.getState(), expected.getState());
+        
+      }
+      
+    }},
+    
+    { name: 'ticking to an earlier tick never rewinds past an applied event', fn: async logger => {
+      
+      const timeStep = getStackTimestep();
+      const old = { ms: 100, op: 'push' as const, item: 'a' };
+      timeStep.processEvent(old); // The head is now ahead of the tick requested below
+      timeStep.tickUpToMs(50);
+      assertEqual(timeStep.getMs() >= 100, true);
+      
+      timeStep.replaceEvent(old, { ms: 105, op: 'push', item: 'a' });
+      assertEqual(timeStep.getState(), { stack: [ 'a' ] });
+      
+    }},
+    
+    { name: 'snapshots roll over by time without events', fn: async logger => {
+      
+      const timeStep = new TimeStep<{}, { num: number }, { ms: number }, Obj<Json>>({
+        registry: {},
+        msPerTick: 10,
+        maxSnapshotDurMs: 25,
+        seed: 0,
+        state: { num: 0 },
+        advance: state => state
+      });
+      timeStep.tickUpToMs(1000);
+      
+      const snapshots = (timeStep as any).snapshots;
+      
+      if (snapshots.length < 10) throw Error('snapshots insufficient');
+      assertEqual(snapshots, snapshots.map(() => [ hasProps, {
+        headTick: [ cmpFn, v => Number.isInteger(v) ],
+        tick: [ cmpFn, v => Number.isInteger(v) ]
+      }]));
+      
+    }},
+    
+    { name: 'replace event beyond retention throws', fn: async logger => {
+      
+      const timeStep = getStackTimestep(3);
+      const first = { ms: 0, op: 'push' as const, item: 'a' };
+      timeStep.processEvent(first);
+      for (let i = 1; i < 20; i++) timeStep.processEvent({ ms: i, op: 'push', item: 'x' });
+      
+      let threw = false;
+      try { timeStep.replaceEvent(first, null); } catch (err) { threw = true; }
+      assertEqual(threw, true);
+      
+    }},
+    
     { name: 'random + reorder (permutations)', fn: async logger => {
       
-      const getRandomTimeStep = (inp: { maxEventsPerSnapshot: number }) => {
+      const getRandomTimeStep = (inp: { maxEventsPerSnapshot: number, msPerTick: number }) => {
         
         type State = {
           num: number
@@ -166,8 +240,8 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         
         return new TimeStep<{}, State, Event, Obj<Json>>({
           registry: {},
-          msPerTick: 1,
-          maxEventsPerSnapshot: inp.maxEventsPerSnapshot,
+          msPerTick: inp.msPerTick,
+          maxSnapshotEvents: inp.maxEventsPerSnapshot,
           seed: 0,
           state: { num: 0 },
           advance: (state, evt, rng) => {
@@ -182,7 +256,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       };
       
       const rng = new Rng(2 ** 32 - 99999);
-      const events = (20)[cl.toArr](v => ({
+      const events = (20)[cl.toArr](v => Object.freeze({ // Frozen: TimeStep must never mutate the events it's fed
         ms: (() => {
           
           // Insert a few identical events on ms=10
@@ -196,14 +270,14 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         ...((v % 2) === 0 ? { op: 'add' as const, max: 10 } : { op: 'mult' as const, max: 4 })
       }));
       
-      // Get the baseline expected value
-      const timeStep1 = getRandomTimeStep({ maxEventsPerSnapshot: 1000 });
+      // Get the baseline expected value; the result is independent of `msPerTick`
+      const timeStep1 = getRandomTimeStep({ maxEventsPerSnapshot: 1000, msPerTick: 1 });
       for (const e of events) timeStep1.processEvent(e);
       const expected = timeStep1.getState();
       
-      for (const maxEventsPerSnapshot of [ 1, 2, 3, 50, 1000 ]) for (let i = 0; i < 50; i++) {
+      for (const msPerTick of [ 1, 7, 1000 / 60 ]) for (const maxEventsPerSnapshot of [ 1, 2, 3, 50, 1000 ]) for (let i = 0; i < 50; i++) {
         
-        const timeStep = getRandomTimeStep({ maxEventsPerSnapshot });
+        const timeStep = getRandomTimeStep({ maxEventsPerSnapshot, msPerTick });
         for (const e of rng.shuffle(events)) timeStep.processEvent(e);
         assertEqual(timeStep.getState(), expected);
         

@@ -241,7 +241,6 @@ const lagMs = 750; // Delays events being sent to the TimeStep for this duration
       
       const nextMs = ms;
       
-      const perfMs = Date.now();
       while (evts.length && evts[0].ms <= (nextMs - lagMs)) {
         const evt = evts.shift()!;
         timeStep.processEvent(evt);
@@ -251,7 +250,7 @@ const lagMs = 750; // Delays events being sent to the TimeStep for this duration
       const state = timeStep.getState();
       for (const ball of state.balls[cl.toArr](v => v)) ball.render({ ms }, draw);
       
-      console.log(`${ms} / 10000 (${Date.now() - perfMs})`);
+      console.log(`${ms} / 10000`);
       
     }}
   });

@@ -1,7 +1,7 @@
 import { rootFact } from '@gershy/disk';
-import png from './util/png.ts';
-import type { Draw } from './util/draw.ts';
-import { Pt } from './util/pt.ts';
+import png from './png.ts';
+import type { Draw } from './draw.ts';
+import { Pt } from './pt.ts';
 
 (async () => {
   

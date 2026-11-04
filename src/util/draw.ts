@@ -35,7 +35,7 @@ export type CanvasCtx = {
   fillRect: (x: number, y: number, w: number, h: number) => void,
   
   font: string,
-  textAlign: 'left' | 'right' | 'center' | 'start' | 'end',
+  textAlign: 'left' | 'center' | 'right' | 'start' | 'end',
   textBaseline: string,
   lineWidth: number,
   fillStyle: string,   fill:   () => void,
@@ -57,10 +57,10 @@ export class Draw {
     };
   }
   
-  public size() { return { w: this.canvas.width, h: this.canvas.height }; }
-  public mid()  { const { w, h } = this.size(); return new Pt({ x: w * 0.5, y: h * 0.5 }); }
+  public size()                      { return { w: this.canvas.width, h: this.canvas.height }; }
+  public mid({ w, h } = this.size()) { return new Pt({ x: w * 0.5, y: h * 0.5 }); }
   
-  public fresh<R>(inp: { fill?: Colour }, fn: () => R) {
+  public fresh<R>(inp: { fill?: Colour }, fn: (inp: { w: number, h: number, mid: Pt }) => R) {
     
     const { w, h } = this.size();
     if (inp?.fill) {
@@ -69,7 +69,7 @@ export class Draw {
     } else {
       this.ctx.clearRect(0, 0, w, h);
     }
-    return fn();
+    return fn({ w, h, mid: this.mid({ w, h }) });
     
   }
   
@@ -176,7 +176,7 @@ export class Draw {
     
   }
 
-  public text(inp: { x: number, y: number, tur: number, text: string, fontSize: number, fill?: Colour, align?: CanvasCtx['textAlign'] }) {
+  public text(inp: { x: number, y: number, tur: number, text: string, fontSize: number, fill: Colour, align?: '<' | '=' | '>' }) {
     
     // TODO: should this dovetail into `this.commit` somehow...?
     const { ctx } = this;
@@ -184,7 +184,7 @@ export class Draw {
     ctx.translate(inp.x, inp.y);
     ctx.rotate(inp.tur * Pt.tau);
     ctx.font = `${inp.fontSize}px monospace`;
-    ctx.textAlign = inp.align ?? 'center';
+    ctx.textAlign = ({ '<': 'left', '=': 'center', '>': 'right' } as const)[inp.align ?? '='];
     ctx.textBaseline = 'middle';
     ctx.fillStyle = inp.fill ?? '#000';
     ctx.fillText(inp.text, 0, 0);
