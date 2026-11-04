@@ -2,7 +2,7 @@ import '@gershy/clearing';
 import { assertEqual, testRunner } from '../../../build/utils.test.ts';
 import { entry } from '@gershy/entry';
 import { TimeStep, TimeStepBeing } from './main.ts';
-import { Random } from '../random.ts';
+import { Rng } from '../rng.ts';
 
 const codec = { type: 'rec', props: {
   reg:    { type: 'str', map: (str: string) => new RegExp(str) },
@@ -22,7 +22,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
     
   })();
   
-  const getStackTimestep = () => {
+  const getStackTimestep = (maxSnapshotsToStore = 50) => {
     
     type State = { stack: string[] };
     type Event = { ms: number } & [
@@ -33,7 +33,9 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
     
     return new TimeStep<{}, State, Event, Rel>({
       registry: {},
+      msPerTick: 1000 / 60,
       maxEventsPerSnapshot: 3,
+      maxSnapshotsToStore,
       seed: 0,
       state: { stack: [] } as { stack: string[] },
       advance: (state, evt) => {
@@ -44,9 +46,8 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         
       },
       relationCfg: {
-        tickMs: 1000 / 60,
         quality: 4,
-        find: _state => []
+        find: () => []
       }
     });
     
@@ -107,6 +108,20 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       });
       
     }},
+
+    { name: 'reorder after snapshot pruning', fn: async logger => {
+      
+      const timeStep = getStackTimestep(3);
+      for (let i = 0; i < 12; i++) {
+        timeStep.processEvent({ ms: i, op: 'push', item: String.fromCharCode(97 + i) });
+      }
+      timeStep.processEvent({ ms: 7.5, op: 'push', item: 'x' });
+      
+      assertEqual(timeStep.getState(), {
+        stack: [ ...'abcdefgh', 'x', ...'ijkl' ]
+      });
+      
+    }},
     
     { name: 'random + reorder (permutations)', fn: async logger => {
       
@@ -119,6 +134,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         
         return new TimeStep<{}, State, Event, null>({
           registry: {},
+          msPerTick: 1,
           maxEventsPerSnapshot: inp.maxEventsPerSnapshot,
           seed: 0,
           state: { num: 0 },
@@ -134,7 +150,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         
       };
       
-      const rng = new Random(2 ** 32 - 99999);
+      const rng = new Rng(2 ** 32 - 99999);
       const events = (20)[cl.toArr](v => ({
         ms: (() => {
           
@@ -205,6 +221,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         
         return new TimeStep<Registry, State, Event, null>({
           registry,
+          msPerTick: 1,
           maxEventsPerSnapshot: 3,
           seed: 0,
           state: { num: 0, funcs: {} },

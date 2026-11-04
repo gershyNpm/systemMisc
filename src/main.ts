@@ -17,7 +17,15 @@ const codec = { type: 'rec', loose: true, props: {
 entry({ name: 'misc', codec, log: { format: { maxStrLen: 3000 } }, fn: async (logger, inp) => tracked(async trk => {
   
   let active = true;
-  process.on('sigint'[cl.upper](), () => { logger.log({ $$: 'cancel' }); active = false; });
+  process.on('sigint'[cl.upper](), () => {
+    if (active) {
+      logger.log({ $$: 'cancel', msg: 'force exit in 15min' });
+      setTimeout(() => { logger.log({ $$: 'force.cancel' }); process.exit(1); }, 1000 * 60 * 15)
+      active = false;
+    } else {
+      logger.log({ $$: 'cancel', msg: 'cancellation already in progress' });
+    }
+  });
   
   logger.log({ $$: 'inp', inp });
   

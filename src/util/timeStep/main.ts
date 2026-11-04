@@ -1,17 +1,26 @@
 import type { Draw } from '../draw.ts';
-import { Random } from '../random.ts';
+import { Rng } from '../rng.ts';
 
-export type Event = { ms: number, [K: string]: Json };
+export type Event = { tick?: number, ms: number, [K: string]: Json };
 export type StateData = null | number | string | TimeStepBeing | StateData[] | { [K in string]: StateData };
 export type State = Obj<StateData>;
+export type Registry = Obj<new (...args: any[]) => TimeStepBeing>;
 
 export type Flow = {
-  ms: number,
-  sc: number // Simply to `ms / 1000`
+  tick: number,
+  ms: number, // Simply to `tick * msPerTick` (events carry their exact input `ms`)
+  sc: number  // Simply to `ms / 1000`
 };
 export abstract class TimeStepBeing {
   
   public static clsName = 'TimeStepBeing';
+  public static decode = (registry: Registry, json: Obj<Json>) => {
+    
+    const { $, ...state } = json;
+    const Cls = registry[$ as string];
+    return new Cls(state);
+    
+  };
   
   public render(flow: Flow, draw: Draw) {
     draw.circle({ x: 0, y: 0, r: 100 + 50 * Math.sin(Math.PI * 2 * flow.sc), fill: '#f00' });
@@ -19,28 +28,31 @@ export abstract class TimeStepBeing {
   
   protected abstract getJsonData(): Obj<Json>
   
-  public getJson() { return { $: (this.constructor as any as { clsName: string }).clsName, ...this.getJsonData() }; }
+  public getJson(): Obj<Json> { return {
+    $: (this.constructor as any as { clsName: string }).clsName,
+    ...{}[cl.merge](this.getJsonData())
+  }; }
   
 };
 
 export type RelationCfg<S extends State, Rel> = {
-  tickMs:  number,                                                 // sub-step size for long time advancements
-  quality: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10,             // binary search size - relation timing is precise within `tickMs / (2 ** precision)` millis
+  quality: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10,             // binary search size - relation timing is precise within `1 / (2 ** quality)` ticks
   find:    (flow: Flow, state: S, lastRels: null | Rel[]) => Rel[]
 };
-export type TimeStepInp<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S extends State, E extends Event, Rel> = {
+export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, Rel> = {
   
   registry: Reg,
+  msPerTick: number,
   maxEventsPerSnapshot?: number,
   maxSnapshotsToStore?: number,
   seed: string | number,
   state: S,
   eventOrder?: (evt0: E, evt1: E) => '=' | '<' | '>',
-  advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Random, reg: Reg) => S,
+  advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S,
   relationCfg?: null | RelationCfg<S, Rel>
   
 };
-export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S extends State, E extends Event, Rel> {
+export class TimeStep<Reg extends Registry, S extends State, E extends Event, Rel> {
   
   // Time advance plan:
   // There are a few components:
@@ -111,14 +123,17 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
     
   };
   
-  protected registry: Reg;
+  public registry: Reg;
   protected maxEventsPerSnapshot: number;
   protected maxSnapshotsToStore: number;
-  protected snapshots: { rng: Random, ms: number, numEvents: number, state: S }[];
-  protected history: E[];
-  protected advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Random, reg: Reg) => S
+  protected msPerTick: number;
+  protected scPerTick: number;
+  protected historyForgetSize: number;
+  protected snapshots: { rng: Rng, tick: number, historyInd: number, numEvents: number, state: S }[];
+  protected history: (E & { tick: number })[];
+  protected advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S;
   protected eventOrder: (src: E, trg: E) => '=' | '<' | '>';
-  protected relationCfg: RelationCfg<S, Rel>;
+  protected relationCfg: null | RelationCfg<S, Rel>;
   
   constructor(inp: TimeStepInp<Reg, S, E, Rel>) {
     
@@ -135,6 +150,8 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
     });
     
     this.registry = inp.registry ?? ({} as any);
+    this.msPerTick = inp.msPerTick;
+    this.scPerTick = inp.msPerTick * 0.001;
     this.maxEventsPerSnapshot = inp.maxEventsPerSnapshot ?? 500;
     this.maxSnapshotsToStore = inp.maxSnapshotsToStore ?? 50;
     
@@ -143,25 +160,14 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
       : inp.seed;
     
     this.snapshots = [
-      { ms: -1, numEvents: Infinity, rng: new Random(seed), state: this.beingClone(inp.state) }, // Fallback snapshot - preserves the initial state
-      { ms:  0, numEvents: 0,        rng: new Random(seed), state: this.beingClone(inp.state) }, // Live snapshot head
+      { tick: -1, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.beingClone(inp.state) }, // Fallback snapshot - preserves the initial state
+      { tick:  0, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.beingClone(inp.state) }, // Live snapshot head
     ];
-    this.history = [ { ms: -1 } as E ];
+    this.history = [];
+    this.historyForgetSize = 0;
     this.advance = inp.advance;
     this.eventOrder = inp.eventOrder ?? TimeStep.eventOrder;
-    this.relationCfg = inp.relationCfg ?? {
-      tickMs: Infinity,
-      quality: 0,
-      find: () => []
-    };
-    
-  }
-  
-  protected beingLaunch(json: Obj<Json> & { $: keyof Reg }): TimeStepBeing {
-    
-    const { $: clsName, ...more } = json;
-    const Cls = this.registry[clsName];
-    return new Cls(more);
+    this.relationCfg = inp.relationCfg ?? null;
     
   }
   
@@ -169,13 +175,20 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
     
     // Note this method works perfectly well for pure json as json is a subset of StateData
     
+    if (v == null) return v; // null / undefined
+    
     if (seen.has(v)) return seen.get(v) as V;
     
+    // Objects with a "$" property represent beings
+    if (cl.isCls(v, Object) && cl.isCls(v.$, String)) return TimeStepBeing.decode(this.registry, v as any) as V;
+    
     if (cl.isCls(v, Object)) {
+      
       const obj = {};
       seen.set(v, obj);
       for (const k in v) obj[k] = this.beingClone(v[k] as StateData, seen);
       return obj as V;
+      
     }
     
     if (cl.isCls(v, Array)) {
@@ -185,46 +198,53 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
       return arr as V;
     }
     
-    if (cl.inCls(v, TimeStepBeing)) {
-      return this.beingLaunch(v.getJson()) as V;
-    }
+    if (cl.inCls(v, TimeStepBeing)) return TimeStepBeing.decode(this.registry, v.getJson()) as V;
     
     return v;
     
   }
   
-  public processEvent(evt: E) {
+  public processEvent(inp: E) {
     
     // To process an event at time T, advance up to T in steps of size `this.relation.dms` - every
     // relation within these steps is precisely narrowed down and resolved first. The current
     // snapshot's `msTailInc` tracks overall advancement. Finally, advance by that event.
     
-    evt = this.beingClone(evt as StateData) as E;
+    const evt = Object.assign(this.beingClone(inp as StateData) as E, { tick: inp.ms / this.msPerTick });
     
-    const snapshotMs = this.snapshots.at(-1)!.ms;
+    const snapshotTick = this.snapshots.at(-1)!.tick;
     
     // Processing `evt` may require reprocessing earlier events - determine all events to process
-    const eventsToPlay = ((): E[] => {
+    const eventsToPlay = ((): (E & { tick: number })[] => {
       
       // If the event occurs beyond the current snapshot window it can be cleanly added
-      if (evt.ms > snapshotMs) return [ evt ];
+      if (evt.tick > snapshotTick) return [ evt ];
       
       // It's possible the event is within the snapshot window, with identical timing to the latest
       // event in that window, but overall later ordering (based on json comparison) - in this case
       // `evt` can also be cleanly added
-      if (evt.ms === snapshotMs && this.eventOrder(evt, this.history.at(-1)!) === '>') return [ evt ];
+      if (true
+        && evt.tick === snapshotTick
+        && this.history.length
+        && this.eventOrder(evt, this.history.at(-1)!) === '>'
+      ) return [ evt ];
       
       // At this point `evt` preceeds some existing events - rollback is needed...
       
       // Find the first snapshot SN prior to `evt`; all later snapshots are deleted and will be
       // reconstructed; replay all events beginning with the 1st event after SN's window
-      const stableSnapInd = this.snapshots.findLastIndex(snp => evt.ms > snp.ms); // The 1st snapshot that is unaffected by the incoming event
-      const stableSnapshot = this.snapshots[stableSnapInd];
+      const stableSnapInd = this.snapshots.findLastIndex(snp => evt.tick > snp.tick); // The 1st snapshot that is unaffected by the incoming event
+      const stableSnap = this.snapshots[stableSnapInd];
       
-      // TODO: inefficient; can search through a lot of events, should be a binary search, consider @gershy/util-sorted-array
-      const stableEventInd = this.history.findLastIndex(evt => evt.ms <= stableSnapshot.ms); // Index of last event of the stable snapshot
-      const replayEventInd = stableEventInd + 1;                                             // The 1st event that follows the stable snapshot i.e. 1st event that needs to be replayed
+      const replayEventInd = stableSnap.historyInd + stableSnap.numEvents - this.historyForgetSize;
       const replayEvents = this.history.slice(replayEventInd);
+      
+      if (globalThis.zzz) {
+        console.log('ROLLBACK', {
+          replayEvents: replayEvents.length,
+          snapshotsLost: this.snapshots.length - (stableSnapInd + 1)
+        });
+      }
       
       let insertInd = 0;
       while (insertInd < replayEvents.length && this.eventOrder(replayEvents[insertInd], evt) !== '>') insertInd++;
@@ -243,18 +263,20 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
         
         const curSnap = this.snapshots.at(-1)!;
         
-        if (curSnap.numEvents < this.maxEventsPerSnapshot) return curSnap;
+        // The initial snapshot always serves as fallback; it's never used as the active snapshot
+        if (curSnap !== this.snapshots[0] && curSnap.numEvents < this.maxEventsPerSnapshot) return curSnap;
         
         // Note we can't blindly terminate a snapshot at its max events - we must also ensure the
         // incoming event doesn't perfectly coincide with the latest snapshot event; if it does
         // coincide it would be flawed to stack it onto the next snapshot, whose time range has no
         // overlap with the current snapshot!
         // TODO: just ignore (or reject) duplicate events?
-        if (this.eventOrder(evt, this.history.at(-1)!) === '=') return curSnap;
+        if (this.history.length && this.eventOrder(evt, this.history.at(-1)!) === '=') return curSnap;
         
         const nextSnap = {
           rng:       curSnap.rng.clone(),
-          ms:        curSnap.ms,
+          tick:      curSnap.tick,
+          historyInd: this.historyForgetSize + this.history.length,
           numEvents: 0,
           state:     this.beingClone(curSnap.state)
         };
@@ -265,6 +287,7 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
           // Consider: maybe there's a smart way to have a denser presence of snapshots closer to
           // the present, with fewer further in the past???
           const forgetSnapshot = this.snapshots.shift()!;
+          this.historyForgetSize += forgetSnapshot.numEvents;
           this.history = this.history.slice(forgetSnapshot.numEvents); // TODO: inefficient? consider linked-list for history??
           
         }
@@ -273,37 +296,42 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
         
       })();
       
-      this.setTimeMs(evt.ms); // Note this can introduce relational discontinuities
+      this.setTick(evt.tick); // Note this can introduce relational discontinuities
       
       this.history.push(evt);
       snap.numEvents++;
-      snap.ms = evt.ms;
-      snap.state = this.advance(snap.state, evt, snap.rng, this.registry);
+      snap.tick = evt.tick;
+      snap.state = this.advance(snap.state, evt, snap.rng, this.registry) ?? snap.state;
       
     }
     
-    // We've only advanced time up until `evt.ms` - if the snapshot had extended further, we need
+    // We've only advanced time up until `evt.tick` - if the snapshot had extended further, we need
     // to readvance to that time
-    if (this.snapshots.at(-1)!.ms < snapshotMs) this.setTimeMs(snapshotMs);
+    if (this.snapshots.at(-1)!.tick < snapshotTick) this.setTick(snapshotTick);
     
   }
   
-  public getTimeMs() { return this.snapshots.at(-1)!.ms; }
+  public getTick() { return this.snapshots.at(-1)!.tick; }
   
-  public setTimeMs(ms: number) {
+  public getMs() { return this.getTick() * this.msPerTick; }
+  
+  protected getFlow(tick: number): Flow {
+    return { tick, ms: tick * this.msPerTick, sc: tick * this.scPerTick };
+  }
+  
+  protected setTick(tick: number) {
     
     const snap = this.snapshots.at(-1)!;
-    if (ms < snap.ms) throw Error('negative time advancement invalid')[cl.mod]({ curMs: snap.ms, setMs: ms });
+    const { find, quality } = this.relationCfg ?? { quality: 0, find: () => [] };
+    const stepTicks = this.relationCfg ? 1 : Infinity; // Without relations there's nothing to resolve between events
     
-    const { tickMs, find, quality } = this.relationCfg;
-    
-    while (snap.ms < ms) {
+    while (snap.tick < tick) {
       
-      const blindNextMs = (Math.floor(snap.ms / tickMs) + 1) * tickMs; // The next tick-aligned step to snap to
-      const naiveNextMs = Math.min(blindNextMs, ms);                   // Takes into account overshooting the requested `ms` inp
+      const blindNextTick = (Math.floor(snap.tick / stepTicks) + 1) * stepTicks; // The next tick-aligned step to snap to
+      const naiveNextTick = Math.min(blindNextTick, tick);                       // Takes into account overshooting the requested `tick` inp
       
-      const getRelCheck = (ms: number, last?: Rel[]) => ({ ms, rels: find({ ms, sc: ms * 0.001 }, snap.state, last ?? null) });
-      const earliestRelCheck = getRelCheck(naiveNextMs);
+      const getRelCheck = (tick: number, last?: Rel[]) => ({ tick, rels: find(this.getFlow(tick), snap.state, last ?? null) });
+      const earliestRelCheck = getRelCheck(naiveNextTick);
       
       // If we found relations, iterate to improve precision - note that if no relations are found
       // at the exact end of the range, we assume there are no relations anywhere in the range!
@@ -311,46 +339,107 @@ export class TimeStep<Reg extends Obj<new (...args: any[]) => TimeStepBeing>, S 
         
         // We'll narrow down the window to figure out the earliest moment, based on `quality`, any
         // relations occurred
-        let windowHeadMs = snap.ms;
-        let windowTailMs = naiveNextMs;
+        let windowHeadTick = snap.tick;
+        let windowTailTick = naiveNextTick;
         for (let i = 0; i < quality; i++) {
           
-          const earlierRelCheck = getRelCheck((windowHeadMs + windowTailMs) * 0.5, earliestRelCheck.rels); // Check if there are still relations at the range's midpoint
+          const earlierRelCheck = getRelCheck((windowHeadTick + windowTailTick) * 0.5, earliestRelCheck.rels); // Check if there are still relations at the range's midpoint
           if (earlierRelCheck.rels.length) {
             
             // There are still relations at the midpoint! Update to these earlier relations, prepare
             // to check even earlier (the earlier half of the remaining range)
             Object.assign(earliestRelCheck, earlierRelCheck);
-            windowHeadMs = earlierRelCheck.ms;
+            windowHeadTick = earlierRelCheck.tick;
             
           } else {
             
             // No relations found at the midpoint - prepare to check later (the later half of the
             // remaining range)
-            windowTailMs = earlierRelCheck.ms;
+            windowTailTick = earlierRelCheck.tick;
             
           }
           
         }
         
         // Finally produce a "rel" event for the earliest moment any relations occurred
-        this.advance(
+        snap.state = this.advance(
           snap.state,
-          { ms: earliestRelCheck.ms, op: 'timeStep.rel' as const, rels: earliestRelCheck.rels },
+          { ...this.getFlow(earliestRelCheck.tick), op: 'timeStep.rel' as const, rels: earliestRelCheck.rels },
           snap.rng,
           this.registry
-        );
+        ) ?? snap.state;
         
       }
       
-      snap.ms = earliestRelCheck.ms;
+      snap.tick = earliestRelCheck.tick;
       
     }
     
-    snap.ms = ms; // Set exactly to eliminate any floating point noise
+    snap.tick = tick; // Set exactly to eliminate any floating point noise
     
   }
   
+  public tickUpToMs(ms: number) { return this.setTick(Math.floor(ms / this.msPerTick)); }
+  
   public getState() { return this.beingClone(this.snapshots.at(-1)!.state); }
   
+  public encode() {
+    
+    const snap = this.snapshots[0];
+    const { rng, tick, state } = snap;
+    
+    const exportState = (state: StateData): Json => {
+      
+      if (state == null) return state;
+      
+      if (cl.isCls(state, Object)) return state[cl.map](v => exportState(v));
+      
+      if (cl.isCls(state, Array)) return state[cl.map](v => exportState(v));
+      
+      if (cl.inCls(state, TimeStepBeing)) return state.getJson();
+      
+      return state;
+      
+    };
+    
+    return {
+      snap: {
+        rng: rng.export(),
+        tick,                           // The tick of the earliest snapshot in memory
+        state: exportState(state)
+      },
+      history: this.history.slice(snap.historyInd + snap.numEvents - this.historyForgetSize),
+      tick: this.snapshots.at(-1)!.tick // The tick most recently advanced to
+    };
+    
+  }
+  
+  public decode(inp: ReturnType<TimeStep<any, S, any, any>['encode']>) {
+    
+    const { snap, history, tick } = inp;
+    
+    // Move to a single stable snapshot
+    this.historyForgetSize = 0;
+    this.snapshots = [{
+      rng: new Rng(snap.rng.state),
+      tick: snap.tick,
+      historyInd: 0,
+      numEvents: 0,
+      state: this.beingClone(snap.state as S)
+    }];
+    
+    // Replay all history on top of the initial stable snapshot
+    this.history = [];
+    for (const event of history) this.processEvent(event);
+    
+    // Advance any additional time
+    this.setTick(tick);
+    
+    return tick;
+    
+  }
+  
 };
+
+// travel
+// settle

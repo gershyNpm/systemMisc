@@ -7,11 +7,11 @@ const toArr: typeof cl.toArr = cl.toArr;
 const has:   typeof cl.has   = cl.has;
 const mod:   typeof cl.mod   = cl.mod;
 
-export const cmpAny        = Symbol('@gershy/test/cmp/any');
-export const cmpReg        = Symbol('@gershy/test/cmp/reg');
-export const cmpJson       = Symbol('@gershy/test/cmp/json');
-export const cmpPartialObj = Symbol('@gershy/test/cmp/partialObj');
-export const cmpFn         = Symbol('@gershy/test/cmp/fn');
+export const cmpAny   = Symbol('@gershy/test/cmp/any');
+export const cmpReg   = Symbol('@gershy/test/cmp/reg');
+export const cmpJson  = Symbol('@gershy/test/cmp/json');
+export const hasProps = Symbol('@gershy/test/cmp/hasProps');
+export const cmpFn    = Symbol('@gershy/test/cmp/fn');
 
 export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal: true } | { equal: false, path: (string | number)[], [K: string]: any } => {
   
@@ -34,12 +34,10 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
     
   }
   
-  if (v1[0] === cmpPartialObj) {
-    
-    if (!isCls(v0, Object)) return { equal: false, path, reason: 'nonobject', cls0: getCls(v0) };
+  if (v1[0] === hasProps) {
     
     const p1 = v1[1] as Obj<any>;
-    const p0 = v0[cl.slice](p1[cl.toArr]((v, k) => k));
+    const p0 = { ...v0 }[cl.slice](p1[cl.toArr]((v, k) => k));
     return equal(p0, p1, [ ...path, '<partial>' ]);
     
   }
@@ -179,7 +177,9 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
     
   }
   
-  return { equal: false, path, reason: 'unknown comparison', cls: getClsName(v0) };
+  return equal({ ...v0 }, { ...v1 }, [ ...path, '<props>' ]); // TODO: consider `Reflect.ownKeys` and proto chain traversal to fully compare the two objects
+  
+  // return { equal: false, path, reason: 'unknown comparison', cls: getClsName(v0) };
   
 };
 export const assertEqual = (v0: any, v1: any) => {

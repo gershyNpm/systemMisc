@@ -5,13 +5,7 @@ import { Domain } from '@gershy/lilac-domain';
 import type Logger from '@gershy/logger';
 import type { Fact } from '@gershy/disk';
 import playServer from './playServer.ts';
-
-export type PlayOp = {
-  op: 'play',
-  utcMs: number,
-  key: `dir${'L' | 'R' | 'U' | 'D'}` | `act${0 | 1 | 2 | 3 | 4}`,
-  dir: 'up' | 'dn'
-};
+import type { Play } from './play.ts';
 
 export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth }) => {
   
@@ -40,14 +34,25 @@ export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth 
           state: { terrain: [], players: [] }
         },
         launchFn: playServer,
-        invokeFn: async ({ utcMs, launchData, session, inp }) => {
+        invokeFn: async ({ logger, utcMs: serverUtcMs, launchData, session, inp }) => {
           
           // Consider trusted `utcMs` vs untrusted `inp.utcMs`...
           
-          if (!((v): v is PlayOp => cl.isCls(v, Object) && v.op === 'play')(inp)) return null;
+          if (!((v): v is Play.ClientEvent & { op: 'player.key', id: string } => cl.isCls(v, Object) && v.op === 'player.key')(inp)) return null;
+          
+          const { id, ms: clientUtcMs, ...props } = inp;
           
           const player = launchData.players.get(session.id)!;
-          player.actions.push({ ...inp, utcMs: Math.min(inp.utcMs, utcMs) });
+          const utcMs = Math.max(Math.min(clientUtcMs, serverUtcMs), serverUtcMs - 20); // Declared-late events are snapped to the present; declared-early events are tolerated within a certain threshold
+          const ms = utcMs - launchData.ticker.startUtcMs;
+          
+          const event = { ...props, ms, session: { id: player.session.id } };
+          launchData.addEventAndBroadcast(
+            player,
+            event,
+            evt => ({ ...evt, ack: { id, clientUtcMs, serverUtcMs, resolvedUtcMs: utcMs } })
+          );
+          
           return null;
           
         }

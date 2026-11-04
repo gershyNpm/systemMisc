@@ -6,6 +6,8 @@ import { rootFact } from '@gershy/disk';
 import { Pt } from '../pt.ts';
 import png from '../png.ts';
 
+const lagMs = 500; // Delays events being sent to the TimeStep for this duration
+
 (async () => {
   
   const dims = { l: 0, r: 500, u: 0, d: 500 };
@@ -78,6 +80,7 @@ import png from '../png.ts';
   type Registry = typeof registry;
   const timeStep = new TimeStep<Registry, State, Event, Rel>({
     registry,
+    msPerTick: 10,
     seed: 'gershyTimeStepBallTest',
     state: { balls: {} },
     advance: (state, evt, rng, { Ball }) => {
@@ -90,7 +93,7 @@ import png from '../png.ts';
           ms: evt.ms,
           x: rng.nextInt(50, 450),
           y: rng.nextInt(50, 450),
-          vel: new Pt().angMove({ ang: rng.nextFlt(), mag: 30 + rng.nextFlt() * 200 }).json()
+          vel: Pt.polar({ ang: rng.nextFlt(), mag: 30 + rng.nextFlt() * 200 }).json()
         }
       });
       
@@ -168,7 +171,6 @@ import png from '../png.ts';
       
     },
     relationCfg: {
-      tickMs: 10,
       quality: 5,
       find: (flow, state, lastRels) => {
         
@@ -224,14 +226,12 @@ import png from '../png.ts';
     { ms: 5500, op: 'ball.launch', id: 'ggg', colour: '#08c' }
   ];
   
-  const lagMs = 500; // Prevents events from being inserted into the time step for this time duration
-  
   await gif({
     fact: rootFact.kid([ import.meta.dirname, `balls.${lagMs.toString(10)}ms.gif` ]),
     w: 500,
     h: 500,
     quality: 1,
-    fps: 20,
+    fpsc: 20,
     frame: { ms: 10000, fn: ({ draw, ms }) => {
       
       const nextMs = ms;
@@ -241,7 +241,7 @@ import png from '../png.ts';
         const evt = evts.shift()!;
         timeStep.processEvent(evt);
       }
-      timeStep.setTimeMs(nextMs);
+      timeStep.tickUpToMs(nextMs);
       
       const state = timeStep.getState();
       for (const ball of state.balls[cl.toArr](v => v)) ball.render({ ms }, draw);
@@ -257,7 +257,8 @@ import png from '../png.ts';
     w: 500,
     h: 500,
     frame: draw => {
-      for (const ball of state.balls[cl.toArr](v => v)) ball.render({ ms: timeStep.getTimeMs() }, draw);
+      for (const ball of state.balls[cl.toArr](v => v))
+        ball.render({ ms: timeStep.getMs() }, draw);
     }
   });
   

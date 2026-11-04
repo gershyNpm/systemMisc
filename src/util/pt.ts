@@ -1,11 +1,27 @@
 export class Pt {
   
+  static carte(inp: { x: number, y: number }) { return new Pt(inp); }
+  static polar(inp: { ang: 0 | number | 1, mag: number }) {
+    
+    // Note that with the classic canvas coordinate system of x increasing to the right and y
+    // increasing downwards, with ang=0 the output points right, then as ang increases the output
+    // rotates clockwise
+    
+    const ang = inp.ang * 2 * Math.PI;
+    return new Pt({ x: Math.cos(ang) * inp.mag, y: Math.sin(ang) * inp.mag });
+    
+  };
+  static add(pts: Pt[]) {
+    const pt = new Pt();
+    for (const { x, y } of pts) { pt.x += x; pt.y += y; }
+    return pt;
+  };
   static mid(pts: Pt[]) {
-    let x = 0;
-    let y = 0;
-    for (const pt of pts) { x += pt.x; y += pt.y; }
-    const mult = 1 / pts.length;
-    return new Pt({ x: x * mult, y: y * mult });
+    return this.add(pts).mult(1 / pts.length);
+  };
+  static ang(src: { x: number, y: number }, trg: { x: number, y: number }) {
+    const ang = Math.atan2(trg.y - src.y, trg.x - src.x) / (2 * Math.PI);
+    return ang < 0 ? ang + 1 : ang;
   };
   
   public x: number;
@@ -25,24 +41,11 @@ export class Pt {
   public mult(mag: number)                 { return new Pt({ x: this.x * mag, y: this.y * mag }); }
   public norm()                            { return this.mult(1 / this.len()); }
   
-  public moveTo(pt: { x: number, y: number }, amt: number) {
+  public rotateBy(ang: number) {
     
-    const dx = pt.x - this.x;
-    const dy = pt.y - this.y;
-    const mult = amt / Math.sqrt(dx * dx + dy * dy)
-    return this.add({ x: dx * mult, y: dy * mult });
+    const cur = Pt.ang({ x: 0, y: 0 }, this);
+    return Pt.polar({ ang: cur + ang, mag: this.len() });
     
-  }
-  
-  public ptMult(pt: { x: number, y: number }) {
-    return new Pt({ x: this.x * pt.x, y: this.y * pt.y });
-  }
-  public angMove(inp: { ang: 0 | number | 1, mag: number }) {
-    const ang = inp.ang * 2 * Math.PI;
-    return new Pt({
-      x: this.x + Math.cos(ang) * inp.mag,
-      y: this.y + Math.sin(ang) * inp.mag
-    });
   }
   
 };

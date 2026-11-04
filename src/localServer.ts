@@ -62,8 +62,8 @@ export default async (inp: LocalServerInp): Promise<RunServerInpFnOut> => {
         debug: false,
         dirFact: rootFact.kid([ import.meta.dirname ]),
         script: String[cl.baseline](`
-          | import playServer from './playServer.ts';
-          | playServer();
+          | import playClient from './playClient.ts';
+          | playClient();
         `)
       });
       
