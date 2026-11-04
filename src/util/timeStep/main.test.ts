@@ -1,7 +1,7 @@
 import '@gershy/clearing';
 import { assertEqual, testRunner } from '../../../build/utils.test.ts';
 import { entry } from '@gershy/entry';
-import { TimeStep, TimeStepBeing } from './main.ts';
+import { TimeStep } from './main.ts';
 import { Rng } from '../rng.ts';
 
 const codec = { type: 'rec', props: {
@@ -177,78 +177,6 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
         assertEqual(timeStep.getState(), expected);
         
       }
-      
-      
-    }},
-    
-    { name: 'random + reorder + being', fn: async logger => {
-      
-      const getTimeStep = () => {
-        
-        const registry = (() => {
-          
-          class Func extends TimeStepBeing {
-            
-            static clsName: 'Func';
-            
-            protected data: { ms: number, type: 'vel' | 'acl', x: number, y: number };
-            
-            constructor(data: Func['data']) {
-              super();
-              this.data = data;
-            }
-            
-            public update(inp: { x: number, y: number }) { Object.assign(this.data, inp); }
-            
-            protected getJsonData() { return this.data; }
-            
-          };
-          
-          return { Func };
-          
-        })();
-        type Registry = typeof registry;
-        
-        type State = {
-          num: number,
-          funcs: { [K: string]: InstanceType<Registry['Func']> }
-        };
-        type Event = { ms: number } & [
-          { op: 'launch', id: string, type: 'vel' | 'acl', val: { x: [ number, number ], y: [ number, number ] } },
-          { op: 'update', id: string,                      val: { x: [ number, number ], y: [ number, number ] } },
-          { op: 'cancel', id: string }
-        ][number];
-        
-        return new TimeStep<Registry, State, Event, null>({
-          registry,
-          msPerTick: 1,
-          maxEventsPerSnapshot: 3,
-          seed: 0,
-          state: { num: 0, funcs: {} },
-          advance: (state, evt, rng, { Func }) => {
-            
-            if (evt.op === 'launch') state.funcs[evt.id] = new Func({
-              ms: evt.ms,
-              type: evt.type,
-              x: rng.nextInt(evt.val.x[0], evt.val.x[1]),
-              y: rng.nextInt(evt.val.y[0], evt.val.y[1])
-            });
-            
-            if (evt.op === 'update') state.funcs[evt.id].update({
-              x: rng.nextInt(evt.val.x[0], evt.val.x[1]),
-              y: rng.nextInt(evt.val.y[0], evt.val.y[1])
-            });
-            
-            if (evt.op === 'cancel') delete state.funcs[evt.id];
-            
-            return state;
-            
-          }
-        });
-        
-      };
-      
-      void getTimeStep; // TODO
       
       
     }},

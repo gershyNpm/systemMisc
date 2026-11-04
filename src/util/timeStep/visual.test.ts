@@ -1,12 +1,13 @@
 import '@gershy/clearing';
 import gif from '../gif.ts';
-import { TimeStep, TimeStepBeing, type Flow } from './main.ts';
+import { TimeStep, type Flow } from './main.ts';
+import { BaseCls } from '../wire/main.ts';
 import type { Draw } from '../draw.ts';
 import { rootFact } from '@gershy/disk';
 import { Pt } from '../pt.ts';
 import png from '../png.ts';
 
-const lagMs = 500; // Delays events being sent to the TimeStep for this duration
+const lagMs = 750; // Delays events being sent to the TimeStep for this duration
 
 (async () => {
   
@@ -20,15 +21,16 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
     { op: 'ball.launch', id: string, colour: `#${string}` }
   ][number];
   type Rel = [
-    { op: 'balls', balls: [ Ball, Ball ], distSqr: number },
-    { op: 'walls', ball: Ball, wallDists: { [K in Wall]?: number } }
+    { op: 'balls', balls: [ string, string ], distSqr: number },
+    { op: 'walls', ball: string, wallDists: { [K in Wall]?: number } }
   ][number];
   
-  class Ball extends TimeStepBeing {
+  class Ball extends BaseCls {
     
-    static clsName = 'Ball';
+    public static readonly clsName = 'Ball';
     
     public state: {
+      id: string,
       ms: number,
       r: number,
       colour: `#${string}`,
@@ -72,7 +74,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
       draw.circle({ x, y, r: this.state.r, fill: this.state.colour });
     }
     
-    getJsonData() { return this.state; }
+    encode() { return this.state; }
     
   };
   
@@ -86,6 +88,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
     advance: (state, evt, rng, { Ball }) => {
       
       if (evt.op === 'ball.launch') state.balls[evt.id] = new Ball({
+        id: evt.id,
         ms: evt.ms,
         r: rng.nextInt(10, 50),
         colour: evt.colour,
@@ -93,7 +96,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
           ms: evt.ms,
           x: rng.nextInt(50, 450),
           y: rng.nextInt(50, 450),
-          vel: Pt.polar({ ang: rng.nextFlt(), mag: 30 + rng.nextFlt() * 200 }).json()
+          vel: Pt.polar({ tur: rng.nextFlt(), mag: 30 + rng.nextFlt() * 200 }).encode()
         }
       });
       
@@ -101,7 +104,9 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
         
         if (rel.op === 'walls') {
           
-          const { ball, wallDists } = rel;
+          const ball = state.balls[rel.ball];
+          
+          const { wallDists } = rel;
           
           const vel = { ...ball.state.anch.vel };
           const pos = { ...ball.getPos(evt) };
@@ -125,9 +130,10 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
         
         if (rel.op === 'balls') {
           
-          const [ ball0, ball1 ] = rel.balls;
-          const [ pos0, pos1 ] = rel.balls.map(ball => ball.getPos(evt));
-          const [ vel0, vel1 ] = rel.balls.map(ball => new Pt(ball.state.anch.vel));
+          const balls = rel.balls.map(id => state.balls[id]);
+          const [ ball0, ball1 ] = balls;
+          const [ pos0, pos1 ] = balls.map(ball => ball.getPos(evt));
+          const [ vel0, vel1 ] = balls.map(ball => new Pt(ball.state.anch.vel));
           
           const posOff = pos1.sub(pos0);
           const dist = posOff.len() || 1;
@@ -175,7 +181,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
       find: (flow, state, lastRels) => {
         
         const balls = lastRels
-          ? [ ...new Set(lastRels.map(rel => rel.op === 'balls' ? rel.balls : rel.ball).flat(1)) ]
+          ? [ ...new Set(lastRels.map(rel => rel.op === 'balls' ? rel.balls : rel.ball).flat(1).map(id => state.balls[id])) ]
           : state.balls[cl.toArr](v => v);
         
         const rels: Rel[] = [];
@@ -193,7 +199,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
             d: +dims.d - (pos1.y + r)
           }[cl.map](v => v >= 0 ? cl.skip : v);
           
-          if (!wallDists[cl.empty]()) rels.push({ op: 'walls', ball, wallDists });
+          if (!wallDists[cl.empty]()) rels.push({ op: 'walls', ball: ball.state.id, wallDists });
           
         }
         
@@ -206,7 +212,7 @@ const lagMs = 500; // Delays events being sent to the TimeStep for this duration
           const pos2 = ball2.getPos(flow);
           const distSqr = (pos1.x - pos2.x) ** 2 + (pos1.y - pos2.y) ** 2;
           const rSqr = (ball1.state.r + ball2.state.r) ** 2;
-          if (distSqr < rSqr) rels.push({ op: 'balls', balls: [ ball1, ball2 ], distSqr });
+          if (distSqr < rSqr) rels.push({ op: 'balls', balls: [ ball1.state.id, ball2.state.id ], distSqr });
           
         }}
         

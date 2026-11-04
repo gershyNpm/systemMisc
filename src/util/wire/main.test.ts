@@ -3,6 +3,8 @@ import { assertEqual, cmpAny, hasProps, testRunner } from '../../../build/utils.
 import { entry } from '@gershy/entry';
 import { BaseCls, makeCls, Wire } from './main.ts';
 
+Error.stackTraceLimit = 200;
+
 const codec = { type: 'rec', props: {
   reg:    { type: 'str', map: (str: string) => new RegExp(str) },
   effort: { type: 'enum', opts: [ 0, 1, 2, 3, 4, 5, 6 ] }
@@ -95,6 +97,42 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       assertEqual(cycle2 === cycle, false);
       assertEqual(cycle2, [ hasProps, { a: { b: { c: cmpAny } } } ]);
       assertEqual(cycle2, { a: { b: { c: cycle2 } } });
+      
+    }},
+    
+    { name: 'wire cycle ducktype instance', fn: async logger => {
+      
+      // Note this also tests a ducktyped `BaseCls` - `Boiii` doesn't actually extend `BaseCls`
+      
+      class Boiii {
+        
+        public static readonly clsName = 'Boiii';
+        
+        public data: any;
+        constructor(inp: { data: Boiii['data'] }) {
+          this.data = inp.data;
+        }
+        encode() { return { data: this.data }; }
+        
+      };
+      
+      const cycleBoi = new Boiii({ data: {
+        
+        a: { b: { c: null } },
+        someone: new Boiii({ data: 'someone' })
+        
+      }});
+      cycleBoi.data.a.b.c = cycleBoi;
+      
+      const wire = new Wire({ Boiii });
+      const cycleBoi2 = wire.clone(cycleBoi);
+      assertEqual(cycleBoi2 === cycleBoi, false);
+      assertEqual(cycleBoi2, [ hasProps, {
+        data: {
+          a: { b: { c: cycleBoi2 } },
+          someone: [ hasProps, { data: 'someone' }]
+        }
+      }]);
       
     }}
     

@@ -1,6 +1,7 @@
 export type WireInst = BaseCls & { encode: () => WireData };
 export type WireDecode<Inst extends WireInst> = (enc: ReturnType<Inst['encode']>) => WireInst
-export type WireCtor<I extends WireInst> = { new (inp: ReturnType<I['encode']>): BaseCls & I };
+export type WireCtor<I extends WireInst> = abstract new (inp: ReturnType<I['encode']>) => BaseCls & I;
+export type Registry = Obj<WireCtor<any> & { clsName: string }>;
 export type MakeClsInp<Inst extends WireInst> = {
   
   name: string,
@@ -8,34 +9,31 @@ export type MakeClsInp<Inst extends WireInst> = {
   
 };
 export abstract class BaseCls {
-  
-  public static clsName = 'BaseCls';
-  
+  public static readonly clsName: string = 'BaseCls';
   public abstract encode(): Obj<WireData>;
-  
 };
 
 export const makeCls = <Ctor extends WireInst>(inp: MakeClsInp<Ctor>) => {
   
+  // Constructors must purely assign their input - `Wire.decode` calls them with a placeholder
+  // return Object.assign(inp.Cls, { name: inp.name, clsName: inp.clsName }); // TODO: can we just do this??
   return class WireCls extends inp.Cls {
-    
-    public static name    = inp.name;
     public static clsName = inp.name;
-    
   };
   
 };
 
-type WireData = undefined | null | boolean | number | string | WireInst | WireData[] | { [K: string]: WireData };
-export class Wire<Registry extends Obj<WireCtor<any> & { clsName: string }>> {
+export type WireData = undefined | null | boolean | number | string | WireInst | WireData[] | { [K: string]: WireData };
+export class Wire<Reg extends Registry> {
   
   protected static opKey = '$$';
   protected static dummyParam = new Proxy({}, { get(t, p, r) { return r; } });
-  protected registry: Registry;
   
-  constructor(inp: Registry) {
+  public readonly registry: Reg;
+  
+  constructor(inp: Reg) {
     
-    for (let k in inp)
+    for (const k in inp)
       if (k !== inp[k].clsName)
         throw Error('registry key invalid')[cl.mod]({ key: k, clsName: inp[k].clsName });
     
@@ -43,28 +41,32 @@ export class Wire<Registry extends Obj<WireCtor<any> & { clsName: string }>> {
     
   }
   
-  protected encodeZoo(val: WireData, heap: Json[], seen: Map<WireData, number>) {
+  protected encodeZoo(val: WireData, heap: Json[], seen: Map<WireData, number>): Json {
     
-    if (cl.inCls(val, BaseCls)) {
-      const obj = val.encode()[cl.map](val => this.encode({ val, heap, seen }).ind);
-      return {
-        [Wire.opKey]: `cls:${(val.constructor as any as { clsName: string}).clsName}`,
-        obj
-      };
-    }
+    const Cls = cl.getCls(val);
     
-    if (cl.isCls(val, Object)) {
-      const obj = val[cl.map](val => this.encode({ val, heap, seen }).ind);
-      return cl.isCls(val[Wire.opKey], String)
+    if (Cls === Object) {
+      const obj = (val as Obj<WireData>)[cl.map](val => this.encode({ val, heap, seen }).ind);
+      return cl.isCls((val as Obj<WireData>)[Wire.opKey], String)
         ? { [Wire.opKey]: 'obj', obj: obj }
         : obj;
     }
     
-    if (cl.isCls(val, Array)) {
-      return val[cl.map](val => this.encode({ val, heap, seen }).ind);
+    if (Cls === Array) {
+      return (val as Obj<WireData>)[cl.map](val => this.encode({ val, heap, seen }).ind);
     }
     
-    return val;
+    if ([ undefined, null, Boolean, Number, String ][cl.has](Cls)) return val as Json;
+    
+    Error[cl.assert]({ registry: this.registry, Cls }, ({ registry, Cls }) => {
+      return cl.isCls(Cls.clsName, String) && registry[cl.has](Cls.clsName);
+    });
+    
+    const obj = (val as BaseCls).encode()[cl.map](val => this.encode({ val, heap, seen }).ind);
+    return {
+      [Wire.opKey]: `cls:${((val as BaseCls).constructor as any as { clsName: string}).clsName}`,
+      obj
+    };
     
   }
   
@@ -100,14 +102,14 @@ export class Wire<Registry extends Obj<WireCtor<any> & { clsName: string }>> {
       
       if (op === 'cls') {
         
-        if (!this.registry[cl.has](v))    throw Error('decode cls name invalid')[cl.mod]({ ind, cls: v });
-        if (!cl.isCls(props.obj, Object)) throw Error('decode cls obj invalid')[cl.mod]({ ind, obj: props.obj });
+        Error[cl.assert](props, props => cl.isCls(props.obj, Object));
+        Error[cl.assert]({ registry: this.registry, v }, props => props.registry[cl.has](v));
         
-        const Cls = this.registry[v];
-        const inst = new Cls(Wire.dummyParam); // Slightly hacky(?) way to force access to an instance without needing its constructor params
+        const Cls = this.registry[v] as any as (new (inp: any) => BaseCls);
+        const inst = new Cls(Wire.dummyParam); // (hacky????) way to force access to an instance without needing its constructor params
         seen.set(ind, inst);
         
-        const decData = (props.obj as Obj<number>)[cl.map](ind => this.decode({ heap, ind }));
+        const decData = (props.obj as Obj<number>)[cl.map](ind => this.decode({ heap, ind, seen }));
         Object.assign(inst, new Cls(decData)); // Now force-feed the actual data into the class instance
         return inst;
         
@@ -142,6 +144,13 @@ export class Wire<Registry extends Obj<WireCtor<any> & { clsName: string }>> {
     }
     
     return val;
+    
+  }
+  
+  public clone<Wd extends WireData>(val: Wd) {
+    
+    // TODO: This can probably be more efficient - no need for the intermediate heap representation
+    return this.decode(this.encode({ val })) as Wd;
     
   }
   

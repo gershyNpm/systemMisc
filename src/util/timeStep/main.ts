@@ -1,50 +1,32 @@
-import type { Draw } from '../draw.ts';
 import { Rng } from '../rng.ts';
+import { Wire, type WireCtor, type WireData } from '../wire/main.ts';
 
 export type Event = { tick?: number, ms: number, [K: string]: Json };
-export type StateData = null | number | string | TimeStepBeing | StateData[] | { [K in string]: StateData };
+export type StateData = WireData;
 export type State = Obj<StateData>;
-export type Registry = Obj<new (...args: any[]) => TimeStepBeing>;
+export type Registry = Obj<WireCtor<any> & { clsName: string }>;
 
 export type Flow = {
   tick: number,
   ms: number, // Simply to `tick * msPerTick` (events carry their exact input `ms`)
   sc: number  // Simply to `ms / 1000`
 };
-export abstract class TimeStepBeing {
-  
-  public static clsName = 'TimeStepBeing';
-  public static decode = (registry: Registry, json: Obj<Json>) => {
-    
-    const { $, ...state } = json;
-    const Cls = registry[$ as string];
-    return new Cls(state);
-    
-  };
-  
-  public render(flow: Flow, draw: Draw) {
-    draw.circle({ x: 0, y: 0, r: 100 + 50 * Math.sin(Math.PI * 2 * flow.sc), fill: '#f00' });
-  }
-  
-  protected abstract getJsonData(): Obj<Json>
-  
-  public getJson(): Obj<Json> { return {
-    $: (this.constructor as any as { clsName: string }).clsName,
-    ...{}[cl.merge](this.getJsonData())
-  }; }
-  
-};
 
 export type RelationCfg<S extends State, Rel> = {
-  quality: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10,             // binary search size - relation timing is precise within `1 / (2 ** quality)` ticks
+  
+  // binary search size - relation timing is precise within `1 / (2 ** quality)` ticks
+  quality: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10,
+  
   find:    (flow: Flow, state: S, lastRels: null | Rel[]) => Rel[]
+  
 };
-export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, Rel> = {
+export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, Rel extends Json> = {
   
   registry: Reg,
-  msPerTick: number,
-  maxEventsPerSnapshot?: number,
-  maxSnapshotsToStore?: number,
+  msPerTick: number,             // Conversion ratio from timestep ticks to real milliseconds
+  minMsPerTick?: number,         // Prevents bisections that would result in less than this time elapsing in a subframe
+  maxEventsPerSnapshot?: number, // Causes snapshots to roll over when they hit this limit
+  maxSnapshotsToStore?: number,  // Causes older snapshots to be discarded
   seed: string | number,
   state: S,
   eventOrder?: (evt0: E, evt1: E) => '=' | '<' | '>',
@@ -52,7 +34,7 @@ export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, 
   relationCfg?: null | RelationCfg<S, Rel>
   
 };
-export class TimeStep<Reg extends Registry, S extends State, E extends Event, Rel> {
+export class TimeStep<Reg extends Registry, S extends State, E extends Event, Rel extends Json> {
   
   // Time advance plan:
   // There are a few components:
@@ -123,10 +105,11 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     
   };
   
-  public registry: Reg;
+  protected wire: Wire<Reg>;
   protected maxEventsPerSnapshot: number;
   protected maxSnapshotsToStore: number;
   protected msPerTick: number;
+  protected minMsPerTick: number;
   protected scPerTick: number;
   protected historyForgetSize: number;
   protected snapshots: { rng: Rng, tick: number, historyInd: number, numEvents: number, state: S }[];
@@ -137,20 +120,9 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   
   constructor(inp: TimeStepInp<Reg, S, E, Rel>) {
     
-    // Ensure every registry class has a unique static `clsName` property - protects against poor
-    // `TimeStepBeing` subclasses which fail to define a unique `clsName` property
-    if (inp.registry) Error[cl.assert](inp.registry, reg => {
-      
-      const classNames = reg[cl.toArr](Cls => (Cls as any).clsName as string);
-      if (classNames.some(n => !cl.isCls(n, String))) return false;
-      
-      const uniqueNames = new Set(classNames);
-      return classNames.length === uniqueNames.size;
-      
-    });
-    
-    this.registry = inp.registry ?? ({} as any);
+    this.wire = new Wire(inp.registry ?? {});
     this.msPerTick = inp.msPerTick;
+    this.minMsPerTick = inp.minMsPerTick ?? 0;
     this.scPerTick = inp.msPerTick * 0.001;
     this.maxEventsPerSnapshot = inp.maxEventsPerSnapshot ?? 500;
     this.maxSnapshotsToStore = inp.maxSnapshotsToStore ?? 50;
@@ -160,8 +132,8 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       : inp.seed;
     
     this.snapshots = [
-      { tick: -1, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.beingClone(inp.state) }, // Fallback snapshot - preserves the initial state
-      { tick:  0, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.beingClone(inp.state) }, // Live snapshot head
+      { tick: -1, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Fallback snapshot - preserves the initial state
+      { tick:  0, historyInd: 0, numEvents: 0, rng: new Rng(seed), state: this.wire.clone(inp.state) }, // Live snapshot head
     ];
     this.history = [];
     this.historyForgetSize = 0;
@@ -171,46 +143,13 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     
   }
   
-  protected beingClone<V extends StateData>(v: V, seen: Map<StateData, StateData> = new Map()): V {
-    
-    // Note this method works perfectly well for pure json as json is a subset of StateData
-    
-    if (v == null) return v; // null / undefined
-    
-    if (seen.has(v)) return seen.get(v) as V;
-    
-    // Objects with a "$" property represent beings
-    if (cl.isCls(v, Object) && cl.isCls(v.$, String)) return TimeStepBeing.decode(this.registry, v as any) as V;
-    
-    if (cl.isCls(v, Object)) {
-      
-      const obj = {};
-      seen.set(v, obj);
-      for (const k in v) obj[k] = this.beingClone(v[k] as StateData, seen);
-      return obj as V;
-      
-    }
-    
-    if (cl.isCls(v, Array)) {
-      const arr: Json[] = [];
-      seen.set(v, arr as StateData);
-      for (const vv of v) arr.push(this.beingClone(vv, seen));
-      return arr as V;
-    }
-    
-    if (cl.inCls(v, TimeStepBeing)) return TimeStepBeing.decode(this.registry, v.getJson()) as V;
-    
-    return v;
-    
-  }
-  
   public processEvent(inp: E) {
     
     // To process an event at time T, advance up to T in steps of size `this.relation.dms` - every
     // relation within these steps is precisely narrowed down and resolved first. The current
     // snapshot's `msTailInc` tracks overall advancement. Finally, advance by that event.
     
-    const evt = Object.assign(this.beingClone(inp as StateData) as E, { tick: inp.ms / this.msPerTick });
+    const evt = Object.assign(this.wire.clone(inp), { tick: inp.ms / this.msPerTick });
     
     const snapshotTick = this.snapshots.at(-1)!.tick;
     
@@ -239,12 +178,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       const replayEventInd = stableSnap.historyInd + stableSnap.numEvents - this.historyForgetSize;
       const replayEvents = this.history.slice(replayEventInd);
       
-      if (globalThis.zzz) {
-        console.log('ROLLBACK', {
-          replayEvents: replayEvents.length,
-          snapshotsLost: this.snapshots.length - (stableSnapInd + 1)
-        });
-      }
+      if (globalThis.zzz) console.log('ROLLBACK - replay count: ' + replayEvents.length.toString(10));
       
       let insertInd = 0;
       while (insertInd < replayEvents.length && this.eventOrder(replayEvents[insertInd], evt) !== '>') insertInd++;
@@ -278,7 +212,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
           tick:      curSnap.tick,
           historyInd: this.historyForgetSize + this.history.length,
           numEvents: 0,
-          state:     this.beingClone(curSnap.state)
+          state:     this.wire.clone(curSnap.state)
         };
         this.snapshots.push(nextSnap);
         
@@ -301,7 +235,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       this.history.push(evt);
       snap.numEvents++;
       snap.tick = evt.tick;
-      snap.state = this.advance(snap.state, evt, snap.rng, this.registry) ?? snap.state;
+      snap.state = this.advance(snap.state, evt, snap.rng, this.wire.registry) ?? snap.state;
       
     }
     
@@ -346,6 +280,9 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
           const earlierRelCheck = getRelCheck((windowHeadTick + windowTailTick) * 0.5, earliestRelCheck.rels); // Check if there are still relations at the range's midpoint
           if (earlierRelCheck.rels.length) {
             
+            const earlierMsAdvance = (earlierRelCheck.tick - snap.tick) * this.msPerTick;
+            if (earlierMsAdvance < this.minMsPerTick) break;
+            
             // There are still relations at the midpoint! Update to these earlier relations, prepare
             // to check even earlier (the earlier half of the remaining range)
             Object.assign(earliestRelCheck, earlierRelCheck);
@@ -366,7 +303,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
           snap.state,
           { ...this.getFlow(earliestRelCheck.tick), op: 'timeStep.rel' as const, rels: earliestRelCheck.rels },
           snap.rng,
-          this.registry
+          this.wire.registry
         ) ?? snap.state;
         
       }
@@ -381,32 +318,18 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   
   public tickUpToMs(ms: number) { return this.setTick(Math.floor(ms / this.msPerTick)); }
   
-  public getState() { return this.beingClone(this.snapshots.at(-1)!.state); }
+  public getState() { return this.wire.clone(this.snapshots.at(-1)!.state); }
   
   public encode() {
     
     const snap = this.snapshots[0];
     const { rng, tick, state } = snap;
     
-    const exportState = (state: StateData): Json => {
-      
-      if (state == null) return state;
-      
-      if (cl.isCls(state, Object)) return state[cl.map](v => exportState(v));
-      
-      if (cl.isCls(state, Array)) return state[cl.map](v => exportState(v));
-      
-      if (cl.inCls(state, TimeStepBeing)) return state.getJson();
-      
-      return state;
-      
-    };
-    
     return {
       snap: {
         rng: rng.export(),
         tick,                           // The tick of the earliest snapshot in memory
-        state: exportState(state)
+        state: this.wire.encode({ val: state })
       },
       history: this.history.slice(snap.historyInd + snap.numEvents - this.historyForgetSize),
       tick: this.snapshots.at(-1)!.tick // The tick most recently advanced to
@@ -425,7 +348,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       tick: snap.tick,
       historyInd: 0,
       numEvents: 0,
-      state: this.beingClone(snap.state as S)
+      state: this.wire.decode(snap.state) as S
     }];
     
     // Replay all history on top of the initial stable snapshot
@@ -440,6 +363,3 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   }
   
 };
-
-// travel
-// settle

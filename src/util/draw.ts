@@ -1,11 +1,13 @@
-import { Pt } from "./pt.ts";
+import { Pt } from './pt.ts';
 
-type Canvas = {
+export type Colour = `#${string}`;
+export type Look = { line?: Colour, fill?: Colour, lineW?: number };
+export type Canvas = {
   width: number,
   height: number,
   getContext: (mode: '2d') => any
 };
-type CanvasCtx = {
+export type CanvasCtx = {
   
   save: () => void,
   restore: () => void,
@@ -46,61 +48,22 @@ export class Draw {
     return fn();
     
   }
-
-  public rect(inp: { x: number, y: number, w: number, h: number, line?: `#${string}`, fill?: `#${string}` } & ({ line: string } | { fill: string })) {                                     
-    
-    this.commit(inp, () => this.ctx.rect(inp.x, inp.y, inp.w, inp.h));
-    
-  }
-
-  public cone(inp: { x: number, y: number, dir: number, ang: number, r: number, fill?: `#${string}`, line?: `#${string}`, lineW?: number }) {
-    
-    this.commit(inp, () => {
-      
-      const { ctx } = this;
-      const { x, y, dir, ang, r } = inp;
-      
-      const ang0 = (dir - ang * 0.5) * Math.PI * 2;
-      const ang1 = (dir + ang * 0.5) * Math.PI * 2;
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + Math.cos(ang0) * r, y + Math.sin(ang0) * r);
-      ctx.arc(x, y, r, ang0, ang1);
-      ctx.closePath();
-      
-    });
-    
-  }
   
-  public frame(fn: (shift: { trn: (inp: { x: number, y: number }) => void, scl: (amt: number) => void, rot: (ang: number) => void }) => void) {
+  public frame(fn: (shift: { trn: (inp: { x: number, y: number }) => void, scl: (amt: number) => void, tur: (ang: number) => void }) => void) {
     
     this.ctx.save();
     
     fn({
       trn: (inp: { x: number, y: number }) => this.ctx.translate(inp.x, inp.y),
       scl: (inp: number) => this.ctx.scale(inp, inp),
-      rot: (inp: number) => this.ctx.rotate(inp * 2 * Math.PI),
+      tur: (inp: number) => this.ctx.rotate(inp * 2 * Math.PI),
     });
     
     this.ctx.restore();
     
   }
   
-  public clip(fn: () => void) {
-    const { ctx } = this;
-    ctx.beginPath();
-    fn();
-    ctx.clip();
-  }
-  
-  protected set(inp: { lineW?: number, fill?: `#${string}`, line?: `#${string}` } = {}) {
-    Object.assign(this.ctx, {
-      lineWidth: inp.lineW ?? 1,
-      fillStyle: inp.fill ?? '#0000',
-      strokeStyle: inp.line ?? '#0000'
-    });
-  }
-  
-  protected commit(inp: { lineW?: number, line?: `#${string}`, fill?: `#${string}` }, fn: () => void) {
+  protected commit(inp: Look, fn: () => void) {
     
     const { ctx } = this;
     
@@ -114,7 +77,31 @@ export class Draw {
     
   }
   
-  public circle(inp: { x: number, y: number, r: number, line?: `#${string}`, fill?: `#${string}` }) {
+  public clip(fn: () => void) { const { ctx } = this; ctx.beginPath(); fn(); ctx.clip(); }
+  
+  public rect(inp: { x: number, y: number, w: number, h: number } & Look) {
+    this.commit(inp, () => this.ctx.rect(inp.x, inp.y, inp.w, inp.h));
+  }
+
+  public cone(inp: { x: number, y: number, tur: number, sweep: number, r: number } & Look) {
+    
+    this.commit(inp, () => {
+      
+      const { ctx } = this;
+      const { x, y, tur: dir, sweep: ang, r } = inp;
+      
+      const ang0 = (dir - ang * 0.5) * Math.PI * 2;
+      const ang1 = (dir + ang * 0.5) * Math.PI * 2;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(ang0) * r, y + Math.sin(ang0) * r);
+      ctx.arc(x, y, r, ang0, ang1);
+      ctx.closePath();
+      
+    });
+    
+  }
+  
+  public circle(inp: { x: number, y: number, r: number } & Look) {
     
     this.commit(inp, () => {
       
@@ -128,7 +115,22 @@ export class Draw {
     
   }
   
-  public line(inp: { pt0: { x: number, y: number }, pt1: { x: number, y: number }, lineW?: number, line?: `#${string}` }) {
+  public polygon(inp: { pts: { x: number, y: number }[] } & Look) {
+    
+    this.commit(inp, () => {
+      
+      const { ctx } = this;
+      const { pts } = inp;
+      
+      const lastPt = pts.at(-1)!;
+      ctx.moveTo(lastPt.x, lastPt.y);
+      for (const { x, y } of pts) ctx.lineTo(x, y);
+      
+    });
+    
+  }
+  
+  public line(inp: { pt0: { x: number, y: number }, pt1: { x: number, y: number } } & Omit<Look, 'fill'>) {
     
     this.commit(inp, () => {
       this.ctx.moveTo(inp.pt0.x, inp.pt0.y);

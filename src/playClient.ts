@@ -3,7 +3,7 @@ import { PollenSession } from '@gershy/lilac-platformer/main/pollenSession';
 import Logger from '@gershy/logger';
 import { Draw } from './util/draw.ts';
 import type { Platform } from '@gershy/lilac-platformer';
-import playFn, { type Beings, type Play } from './play.ts';
+import playFn, { type Registry, type Play } from './play.ts';
 import { Pt } from './util/pt.ts';
 
 export namespace Browser {
@@ -58,7 +58,7 @@ export default async () => {
     platform: Omit<Platform, '!adminPass'>
   };
   
-  Object.assign(globalThis, { process: {}, global: globalThis, zzz: true }); // TODO: Really should avoid using these references anywhere... they're nodejs-only!
+  Object.assign(globalThis, { process: {}, global: globalThis, zzz: true }); // TODO: ZZZ Really should avoid using these references anywhere... they're nodejs-only!
   
   const logger = new Logger('browser', {}, { maxStrLen: 1000 }, (ctx: any) => {
     
@@ -100,7 +100,7 @@ export default async () => {
       // decimal place to achieve stable ordering
       
       const now = clientNow();
-      if (now <= last.now) return last.now + (++last.reps) * 0.0001;
+      if (now <= last.now) return last.now + (++last.reps) * 0.00001;
       
       last = { now, reps: 0 };
       return now;
@@ -182,6 +182,7 @@ export default async () => {
     const stateJoinedPrm = Promise[cl.later]();
     
     // Sokt event processing
+    const myEvts: (Play.ClientEvent & { id: string })[] = [];
     logger.scope('sokt', {}, async () => {
       
       const hear = await session.hear(logger);
@@ -216,8 +217,14 @@ export default async () => {
       
       while (true) {
         
-        const { done, value: event } = await hear.next() as { done: boolean, value: Play.Event };
+        const { done, value: event } = await hear.next() as { done: boolean, value: Play.AckEvent };
         if (done) break;
+        
+        const { ack = null } = event;
+        if (ack) {
+          const corr = myEvts.find(evt => evt.id === ack.id);
+          if (corr) logger.log({ ping: Date.now() - corr.ms, accepted: ack.resolvedUtcMs === ack.clientUtcMs, offsetToServer: ack.serverUtcMs - ack.clientUtcMs });
+        }
         
         play.addEvent(event);
         
@@ -267,15 +274,17 @@ export default async () => {
           op: 'player.key',
           btn: `${dir}${btn}` as const,
         };
+        myEvts.push({ ...event, ms: Date.now() });
+        while (myEvts.length > 30) myEvts.shift();
+        
         session.tell({ logger, msg: event });
         
       });
       
     })();
     
-    const { Player } = play.timeStep.registry
+    const { Player } = play.registry;
     const offsetMs = play.getOffsetMs();
-    console.log({ offsetMs });
     const draw = new Draw({ canvas: elems.canvas });
     while (true) {
       
@@ -292,7 +301,7 @@ export default async () => {
       
       const entities = play.timeStep.getState().entities;
       
-      const player = entities[cl.at](`${Player.clsName}/${session.id}`, null) as null | Beings['Player'];
+      const player = entities[cl.at](`${Player.clsName}/${session.id}`, null) as null | Registry['Player'];
       
       draw.fresh(() => {
         
@@ -304,15 +313,15 @@ export default async () => {
           const drawMid = draw.mid();
           const h = drawMid.y * 2;
           const off = player
-            ? player.getVals(flow)
-            : { pos: new Pt({ x: 0, y: 0 }), rot: 0 }; // TODO: midpoint of squad
+            ? player.getTransform(flow)
+            : { pos: new Pt({ x: 0, y: 0 }), tur: 0 }; // TODO: midpoint of squad
           
-          const vertMeters = 200;       // Vertical height in meters of viewbox
+          const vertMeters = 100;       // Vertical height in meters of viewbox
           const amtBack = 0.7;          // At 1 the player renders right at the bottom edge of the viewbox; at 0 they render in the middle
           shift.trn(drawMid);           // Relative to center of canvas
           shift.scl(h / vertMeters);
           shift.trn({ x: 0, y: vertMeters * 0.5 * amtBack });  // Shift focus towards bottom of screen
-          shift.rot(-(off.rot + 0.25));
+          shift.tur(-(off.tur + 0.25));
           shift.trn(off.pos.mult(-1));
           
           draw.clip(() => {
