@@ -265,8 +265,7 @@ export const registry = (() => {
       for (const ent of entities) {
         
         for (const timeRel of ent.getRelations(flow))
-          if (timeRel.ms >= flow.ms + 1000)
-            rels.push(timeRel);
+          rels.push(timeRel);
         
         for (const group of ent.getRelationGroups(flow))
           (relGroups[group] ??= []).push(ent)
@@ -894,14 +893,14 @@ export const registry = (() => {
       
       const rels: Play.EntityRel[] = [];
       
-      if (this.state.shootMs) {
+      if (this.state.shootMs !== null) {
         
         const msPerBullet = 150;
         const firstBulletMs = Math.max(this.state.shootMs, this.state.bulletRearmMs);
         for (let ms = firstBulletMs; ms <= flow.ms; ms += msPerBullet) {
-          rels.push({ type: 'ent', entId: this.state.id, ms: flow.ms, inp: {
+          rels.push({ type: 'ent', entId: this.state.id, ms, inp: {
             type: 'bullet',
-            ms: flow.ms
+            ms
           }});
         }
         
