@@ -100,6 +100,17 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       
     }},
     
+    { name: 'infinity', fn: async logger => {
+      
+      const wire = new Wire({});
+      const val = { pos: Infinity, neg: -Infinity };
+      const encoded = JSON.parse(JSON.stringify(wire.encode({ val })));
+      const decoded = wire.decode(encoded);
+      assertEqual(decoded, val);
+      assertEqual(wire.clone([ Infinity, -Infinity ]), [ Infinity, -Infinity ]);
+      
+    }},
+    
     { name: 'wire cycle ducktype instance', fn: async logger => {
       
       // Note this also tests a ducktyped `BaseCls` - `Boiii` doesn't actually extend `BaseCls`

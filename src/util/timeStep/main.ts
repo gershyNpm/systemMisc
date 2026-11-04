@@ -31,7 +31,11 @@ export type TimeStepInp<Reg extends Registry, S extends State, E extends Event, 
   state: S,
   eventOrder?: (evt0: E, evt1: E) => '=' | '<' | '>',
   advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S,
-  relationCfg?: null | RelationCfg<S, Rel>
+  relationCfg?: null | RelationCfg<S, Rel>,
+  signals?: {
+    rollback?: (inp: { replayEvents: E[], snapshotsDiscarded: number }) => void,
+    tick?:     (inp: { requestedTicks: number, subticks: number, relChecks: number, elapsedMs: number }) => void
+  }
   
 };
 export class TimeStep<Reg extends Registry, S extends State, E extends Event, Rel extends Json> {
@@ -59,10 +63,12 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     
     if (src.ms < trg.ms) return '<';
     if (src.ms > trg.ms) return '>';
-    return this.jsonOrder(src, trg) ?? '=';
+    return this.jsonOrder(src, trg);
     
   };
   static jsonOrder = (src: Json, trg: Json): '=' | '<' | '>' => {
+    
+    if (src === trg) return '='; // Handles null, undefined, boolean, number, string
     
     const srcClsName = cl.getClsName(src);
     const trgClsName = cl.getClsName(trg);
@@ -70,8 +76,6 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     if (srcClsName > trgClsName) return '>';
     
     // Now we know `src` and `trg` have the same class
-    
-    if (src === trg) return '='; // Handles `null` and `undefined` too
     
     if ([ Boolean, Number, String ].some(Cls => cl.isCls(src, Cls)))
       return (src as any) < (trg as any) ? '<' : '>';
@@ -117,6 +121,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   protected advance: (state: S, evt: E | { ms: number, op: 'timeStep.rel', rels: Rel[] }, rng: Rng, reg: Reg) => void | S;
   protected eventOrder: (src: E, trg: E) => '=' | '<' | '>';
   protected relationCfg: null | RelationCfg<S, Rel>;
+  protected signals?: TimeStepInp<Reg, S, E, Rel>['signals'];
   
   constructor(inp: TimeStepInp<Reg, S, E, Rel>) {
     
@@ -141,6 +146,108 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     this.eventOrder = inp.eventOrder ?? TimeStep.eventOrder;
     this.relationCfg = inp.relationCfg ?? null;
     
+    if (inp.signals?.rollback) (this.signals ??= {}).rollback = inp.signals.rollback;
+    
+    if (inp.signals?.tick) {
+      
+      (this.signals ??= {}).tick = inp.signals.tick;
+      
+      const origSetTick = this.setTick;
+      Object.assign(this, { setTick: (tick: number) => {
+        
+        const requestedTicks = tick - this.snapshots.at(-1)!.tick;
+        const now = Date.now();
+        
+        const r = origSetTick.call(this, tick);
+        
+        const elapsedMs = Date.now() - now;
+        this.signals!.tick!({
+          elapsedMs,
+          requestedTicks,
+          ...r
+        });
+        
+        return r;
+        
+      }});
+      
+    }
+    
+  }
+  
+  protected getFlow(tick: number): Flow { return { tick, ms: tick * this.msPerTick, sc: tick * this.scPerTick }; }
+  
+  protected setTick(tick: number) {
+    
+    const snap = this.snapshots.at(-1)!;
+    const { find, quality } = this.relationCfg ?? { quality: 0, find: () => [] };
+    const stepTicks = this.relationCfg ? 1 : Infinity; // Without relations there's nothing to resolve between events
+    
+    let subticks = 0;
+    let relChecks = 0;
+    const getRelCheck = (tick: number, last?: Rel[]) => {
+      relChecks++;
+      return { tick, rels: find(this.getFlow(tick), snap.state, last ?? null) };
+    };
+    
+    while (snap.tick < tick) {
+      
+      subticks++;
+      
+      const blindNextTick = (Math.floor(snap.tick / stepTicks) + 1) * stepTicks; // The next tick-aligned step to snap to
+      const naiveNextTick = Math.min(blindNextTick, tick);                       // Takes into account overshooting the requested `tick` inp
+      
+      const earliestRelCheck = getRelCheck(naiveNextTick);
+      
+      // If we found relations, iterate to improve precision - note that if no relations are found
+      // at the exact end of the range, we assume there are no relations anywhere in the range!
+      if (earliestRelCheck.rels.length) {
+        
+        // We'll narrow down the window to figure out the earliest moment, based on `quality`, any
+        // relations occurred
+        let windowHeadTick = snap.tick;
+        let windowTailTick = naiveNextTick;
+        for (let i = 0; i < quality; i++) {
+          
+          const earlierRelCheck = getRelCheck((windowHeadTick + windowTailTick) * 0.5, earliestRelCheck.rels); // Check if there are still relations at the range's midpoint
+          if (earlierRelCheck.rels.length) {
+            
+            const earlierMsAdvance = (earlierRelCheck.tick - snap.tick) * this.msPerTick;
+            if (earlierMsAdvance < this.minMsPerTick) break;
+            
+            // There are still relations at the midpoint! Update to these earlier relations, prepare
+            // to check even earlier (the earlier half of the remaining range)
+            Object.assign(earliestRelCheck, earlierRelCheck);
+            windowHeadTick = earlierRelCheck.tick;
+            
+          } else {
+            
+            // No relations found at the midpoint - prepare to check later (the later half of the
+            // remaining range)
+            windowTailTick = earlierRelCheck.tick;
+            
+          }
+          
+        }
+        
+        // Finally produce a "rel" event for the earliest moment any relations occurred
+        snap.state = this.advance(
+          snap.state,
+          { ...this.getFlow(earliestRelCheck.tick), op: 'timeStep.rel' as const, rels: earliestRelCheck.rels },
+          snap.rng,
+          this.wire.registry
+        ) ?? snap.state;
+        
+      }
+      
+      snap.tick = earliestRelCheck.tick;
+      
+    }
+    
+    snap.tick = tick; // Set exactly to eliminate any floating point noise
+    
+    return { subticks, relChecks };
+    
   }
   
   public processEvent(inp: E) {
@@ -149,7 +256,7 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
     // relation within these steps is precisely narrowed down and resolved first. The current
     // snapshot's `msTailInc` tracks overall advancement. Finally, advance by that event.
     
-    const evt = Object.assign(this.wire.clone(inp), { tick: inp.ms / this.msPerTick });
+    const evt = Object.assign(this.wire.clone(inp), { tick: inp.ms / this.msPerTick }); // TODO: wire clone is necessary? can we just do `{}[cl.merge](inp)`? Or even `{ ...inp }`? That retains arrays by identity so maybe some aliasing funkiness???
     
     const snapshotTick = this.snapshots.at(-1)!.tick;
     
@@ -182,6 +289,11 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
       
       let insertInd = 0;
       while (insertInd < replayEvents.length && this.eventOrder(replayEvents[insertInd], evt) !== '>') insertInd++;
+      
+      this.signals?.rollback?.({
+        replayEvents,
+        snapshotsDiscarded: this.snapshots.length - (stableSnapInd + 1)
+      });
       
       this.snapshots = this.snapshots.slice(0, stableSnapInd + 1); // Maintain all snapshots up to and including the stable snapshot; discard the rest
       this.history = this.history.slice(0, replayEventInd);
@@ -249,76 +361,9 @@ export class TimeStep<Reg extends Registry, S extends State, E extends Event, Re
   
   public getMs() { return this.getTick() * this.msPerTick; }
   
-  protected getFlow(tick: number): Flow {
-    return { tick, ms: tick * this.msPerTick, sc: tick * this.scPerTick };
-  }
-  
-  protected setTick(tick: number) {
-    
-    const snap = this.snapshots.at(-1)!;
-    const { find, quality } = this.relationCfg ?? { quality: 0, find: () => [] };
-    const stepTicks = this.relationCfg ? 1 : Infinity; // Without relations there's nothing to resolve between events
-    
-    while (snap.tick < tick) {
-      
-      const blindNextTick = (Math.floor(snap.tick / stepTicks) + 1) * stepTicks; // The next tick-aligned step to snap to
-      const naiveNextTick = Math.min(blindNextTick, tick);                       // Takes into account overshooting the requested `tick` inp
-      
-      const getRelCheck = (tick: number, last?: Rel[]) => ({ tick, rels: find(this.getFlow(tick), snap.state, last ?? null) });
-      const earliestRelCheck = getRelCheck(naiveNextTick);
-      
-      // If we found relations, iterate to improve precision - note that if no relations are found
-      // at the exact end of the range, we assume there are no relations anywhere in the range!
-      if (earliestRelCheck.rels.length) {
-        
-        // We'll narrow down the window to figure out the earliest moment, based on `quality`, any
-        // relations occurred
-        let windowHeadTick = snap.tick;
-        let windowTailTick = naiveNextTick;
-        for (let i = 0; i < quality; i++) {
-          
-          const earlierRelCheck = getRelCheck((windowHeadTick + windowTailTick) * 0.5, earliestRelCheck.rels); // Check if there are still relations at the range's midpoint
-          if (earlierRelCheck.rels.length) {
-            
-            const earlierMsAdvance = (earlierRelCheck.tick - snap.tick) * this.msPerTick;
-            if (earlierMsAdvance < this.minMsPerTick) break;
-            
-            // There are still relations at the midpoint! Update to these earlier relations, prepare
-            // to check even earlier (the earlier half of the remaining range)
-            Object.assign(earliestRelCheck, earlierRelCheck);
-            windowHeadTick = earlierRelCheck.tick;
-            
-          } else {
-            
-            // No relations found at the midpoint - prepare to check later (the later half of the
-            // remaining range)
-            windowTailTick = earlierRelCheck.tick;
-            
-          }
-          
-        }
-        
-        // Finally produce a "rel" event for the earliest moment any relations occurred
-        snap.state = this.advance(
-          snap.state,
-          { ...this.getFlow(earliestRelCheck.tick), op: 'timeStep.rel' as const, rels: earliestRelCheck.rels },
-          snap.rng,
-          this.wire.registry
-        ) ?? snap.state;
-        
-      }
-      
-      snap.tick = earliestRelCheck.tick;
-      
-    }
-    
-    snap.tick = tick; // Set exactly to eliminate any floating point noise
-    
-  }
-  
   public tickUpToMs(ms: number) { return this.setTick(Math.floor(ms / this.msPerTick)); }
   
-  public getState() { return this.wire.clone(this.snapshots.at(-1)!.state); }
+  public getState() { return this.snapshots.at(-1)!.state; }
   
   public encode() {
     

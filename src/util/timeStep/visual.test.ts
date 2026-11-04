@@ -70,8 +70,7 @@ const lagMs = 750; // Delays events being sent to the TimeStep for this duration
     public getAnchVel() { return new Pt(this.state.anch.vel); }
     
     public render(flow: Flow | { ms: number }, draw: Draw) {
-      const { x, y } = this.getPos(flow);
-      draw.circle({ x, y, r: this.state.r, fill: this.state.colour });
+      draw.circle({ pos: this.getPos(flow), r: this.state.r, fill: this.state.colour });
     }
     
     encode() { return this.state; }

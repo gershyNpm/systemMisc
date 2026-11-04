@@ -43,6 +43,9 @@ export class Wire<Reg extends Registry> {
   
   protected encodeZoo(val: WireData, heap: Json[], seen: Map<WireData, number>): Json {
     
+    if (val === +Infinity) return { [Wire.opKey]: 'num:+inf' };
+    if (val === -Infinity) return { [Wire.opKey]: 'num:-inf' };
+    
     const Cls = cl.getCls(val);
     
     if (Cls === Object) {
@@ -99,6 +102,12 @@ export class Wire<Reg extends Registry> {
       
       if (!cl.isCls(opKey, String)) throw Error('nonstring op key invalid')[cl.mod]({ ind, opKey });
       const [ op, v = '<none>' ] = opKey[cl.cut](':');
+      
+      if (op === 'num') {
+        if (v === '+inf') return +Infinity;
+        if (v === '-inf') return -Infinity;
+        throw Error('decode num invalid')[cl.mod]({ ind, v });
+      }
       
       if (op === 'cls') {
         

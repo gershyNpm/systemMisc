@@ -27,7 +27,7 @@ export default async (inp: { logger: Logger, repoFact: Fact, auth: Soil.AwsAuth 
         
         name: 'platformer',
         baseUrl: import.meta.url,
-        power: 0,
+        power: 2,
         domain: new Domain({ addr: 'gershommaes.com', manualConfirmations: { nameServersConnected: true } }),
         certFact: repoFact.par().kid([ '.manager', 'dev', 'cert' ]),
         localData: {

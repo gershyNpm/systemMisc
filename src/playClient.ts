@@ -3,7 +3,7 @@ import { PollenSession } from '@gershy/lilac-platformer/main/pollenSession';
 import Logger from '@gershy/logger';
 import { Draw } from './util/draw.ts';
 import type { Platform } from '@gershy/lilac-platformer';
-import playFn, { type Registry, type Play } from './play.ts';
+import playFn, { type Play } from './play.ts';
 import { Pt } from './util/pt.ts';
 
 export namespace Browser {
@@ -41,7 +41,15 @@ export namespace Browser {
       currentScript: Browser.Node.Script,
       createElement: (type: string) => Node
     },
-    requestAnimationFrame: (fn: () => any) => void
+    requestAnimationFrame: (fn: () => any) => void,
+    addEventListener: {
+      (term: 'error',              fn: (evt: { error: any }) => any): void,
+      (term: 'unhandledrejection', fn: (evt: { reason: any }) => any): void,
+    },
+    performance: {
+      timeOrigin: number,
+      now: () => number
+    }
   };
   
 };
@@ -94,12 +102,11 @@ export default async () => {
     };
     
     let last = { now: -Infinity, reps: 0 };
-    const inputNow = () => {
+    const inputNow = (now = clientNow()) => {
       
       // Returns timestamps for inputs / rapid events - calls within the same millisecond use a low
       // decimal place to achieve stable ordering
       
-      const now = clientNow();
       if (now <= last.now) return last.now + (++last.reps) * 0.00001;
       
       last = { now, reps: 0 };
@@ -108,6 +115,12 @@ export default async () => {
     };
     
     const browser = globalThis as any as Browser.Window;
+    const errHandler = (err: any) => {
+      console.log('TOP LEVEL ERROR', { err });
+    };
+    browser.addEventListener('error',              evt => errHandler(evt.error));
+    browser.addEventListener('unhandledrejection', evt => errHandler(evt.reason));
+    
     const browserInp: BrowserInp = browser.document.currentScript.src.split('?')[1]
       .split('&')
       [cl.toObj](v => v[cl.cut]('=', 1))
@@ -171,7 +184,7 @@ export default async () => {
     
     const session = await logger.scope('sessionLaunch', {}, async logger => {
       const session = new PollenSession({ flowerId: `domain/${browserInp.platform.dnsHost!}` as const });
-      const { sessionId } = await session.getDef();
+      const { sessionId } = await session.getDef(logger);
       logger.log({ $$: 'result', sessionId });
       return Object.assign(session, { id: sessionId });
     });
@@ -196,7 +209,7 @@ export default async () => {
           const { value: event, done } = (await hear.next()) as { value: Obj<Json>, done: boolean };
           if (done) throw Error('sokt close while joining unexpected');
           
-          if (event.op === 'state.launch') return event as { state: Json, startUtcMs: number, utcMs: number };
+          if (event.op === 'state.launch') return event as { state: Json, pendingEvents: Play.Event[], startUtcMs: number, utcMs: number };
             
           logger.log({ $: 'ignore', event });
           
@@ -211,7 +224,8 @@ export default async () => {
       
       elems.queueStatus('joining state...');
       play.timeStep.decode(stateData.state as any);
-      play.setOffsetMs(clientNow(receivedStateDataUtcMs) - stateData.startUtcMs);
+      play.setPendingEvents(stateData.pendingEvents as any);
+      play.setOffsetMs(clientNow(play.ticker.startUtcMs) - stateData.startUtcMs);
       elems.queueStatus('joined state!');
       stateJoinedPrm.resolve();
       
@@ -223,7 +237,7 @@ export default async () => {
         const { ack = null } = event;
         if (ack) {
           const corr = myEvts.find(evt => evt.id === ack.id);
-          if (corr) logger.log({ ping: Date.now() - corr.ms, accepted: ack.resolvedUtcMs === ack.clientUtcMs, offsetToServer: ack.serverUtcMs - ack.clientUtcMs });
+          if (corr) logger.log({ ping: Date.now() - corr.ms, honoured: ack.resolvedUtcMs === ack.clientUtcMs, offsetToServer: ack.serverUtcMs - ack.clientUtcMs });
         }
         
         play.addEvent(event);
@@ -244,10 +258,12 @@ export default async () => {
         dirU: 'KeyW',
         dirD: 'KeyS',
         
-        rotL1: 'KeyK',
-        rotL2: 'KeyI',
-        rotR1: 'KeyL',
-        rotR2: 'KeyO',
+        turL1: 'KeyK',
+        turL2: 'KeyI',
+        turR1: 'KeyL',
+        turR2: 'KeyO',
+        
+        mod0: 'ShiftLeft',
         
         act0: 'Space',
         act1: 'Semicolon',
@@ -260,7 +276,12 @@ export default async () => {
       };
       const actMap = binds[cl.mapk]((v, k) => [ v, k ]); // Maps key codes to their corresponding action
       const btnState = binds[cl.map](v => '-');
-      for (const dir of [ '+', '-' ] as const) elems.html.addEventListener({ '+': 'keydown', '-': 'keyup' }[dir], (evt: { code: string }) => {
+      for (const dir of [ '+', '-' ] as const) elems.html.addEventListener({ '+': 'keydown', '-': 'keyup' }[dir], (evt: { timeStamp: number, code: string }) => {
+        
+        // Event can be delayed due to event loop and other factors - ignore excessively late
+        // events as the server will reject them either way!
+        const evtNow = browser.performance.timeOrigin + evt.timeStamp;
+        if (evtNow < (Date.now() - 100)) return;
         
         const btn = actMap[cl.at](evt.code, null);
         if (btn === null) return;
@@ -269,7 +290,7 @@ export default async () => {
         btnState[btn] = dir;
         
         const event: Play.ClientEvent & { id: string } = {
-          ms: inputNow(),
+          ms: inputNow(clientNow(evtNow)),
           id: Math.random().toString(36).slice(2),
           op: 'player.key',
           btn: `${dir}${btn}` as const,
@@ -296,17 +317,17 @@ export default async () => {
       if (canvas.width  !== cw) canvas.width  = cw;
       if (canvas.height !== ch) canvas.height = ch;
       
-      const ms = (clientNow() - play.ticker.startUtcMs) + offsetMs;
+      const ms = (Date.now() - play.ticker.startUtcMs) + offsetMs;
       const flow = { ms, sc: ms * 0.001 };
       
-      const entities = play.timeStep.getState().entities;
+      const stage = play.timeStep.getState().world.getStage(flow);
+      const entities = stage.getEntities(flow);
+      const player = entities[cl.at](`${Player.clsName}/${session.id}`, null) as null | Play.Registry['Player'];
       
-      const player = entities[cl.at](`${Player.clsName}/${session.id}`, null) as null | Registry['Player'];
+      const vertMeters = 40;       // Vertical height in meters of viewbox
+      const amtBack = 0.7;          // At 1 the player renders right at the bottom edge of the viewbox; at 0 they render in the middle
       
-      draw.fresh(() => {
-        
-        const { w, h } = draw.size();
-        draw.rect({ x: 0, y: 0, w, h, fill: '#400' });
+      draw.fresh({ fill: '#400' }, () => {
         
         draw.frame(shift => {
           
@@ -316,21 +337,45 @@ export default async () => {
             ? player.getTransform(flow)
             : { pos: new Pt({ x: 0, y: 0 }), tur: 0 }; // TODO: midpoint of squad
           
-          const vertMeters = 100;       // Vertical height in meters of viewbox
-          const amtBack = 0.7;          // At 1 the player renders right at the bottom edge of the viewbox; at 0 they render in the middle
-          shift.trn(drawMid);           // Relative to center of canvas
+          shift.trn(drawMid);                                  // Relative to center of canvas
           shift.scl(h / vertMeters);
           shift.trn({ x: 0, y: vertMeters * 0.5 * amtBack });  // Shift focus towards bottom of screen
           shift.tur(-(off.tur + 0.25));
           shift.trn(off.pos.mult(-1));
           
-          draw.clip(() => {
-            for (const [ , ent ] of entities[cl.walk]()) ent.renderClip(flow, draw);
+          // Determine all rendering operations including the Stage
+          const opsUnsorted = new Array(entities[cl.count]() + 1);
+          let opInd = 0;
+          for (const k in entities) opsUnsorted[opInd++] = entities[k].getRenderOps(flow, draw);
+          opsUnsorted.push(stage.getRenderOps(flow, draw));
+          
+          const renderOps = opsUnsorted.flat(1).sort((a, b) => a.z - b.z);
+          
+          // Render all clipped stuff
+          draw.frame(() => {
+            
+            draw.clip(() => {
+              stage.renderClip(flow, draw);
+              for (const k in entities) entities[k].renderClip(flow, draw);
+            });
+            
+            // Set the base visible ground to this colour (TODO: let `Stage.prototype.render` handle this?)
+            draw.circle({ pos: off.pos, r: 1000, fill: '#ccc' });
+            
+            // This skips past all `z < 0` then renders from lowest to highest (only where (`z >= 0`)
+            for (const renderOp of renderOps)
+              if (renderOp.z >= 0)
+                renderOp.fn();
+            
           });
           
-          draw.circle({ x: off.pos.x, y: off.pos.y, r: 1000, fill: '#ccc' });
-          
-          for (const [ , ent ] of entities[cl.walk]()) ent.render(flow, draw);
+          // Render on top of the clipped game world
+          for (const { z, fn } of renderOps) {
+            
+            if (z >= 0) break;
+            fn();
+            
+          }
           
         });
         

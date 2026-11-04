@@ -63,9 +63,7 @@ entry({ name: 'test', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, { 
       timeStep.processEvent({ ms: 10, op: 'push', item: 'b' });
       timeStep.processEvent({ ms: 20, op: 'push', item: 'c' });
       
-      assertEqual(timeStep.getState(), {
-        stack: [ 'a', 'b', 'c' ]
-      });
+      assertEqual(timeStep.getState(), { stack: [ 'a', 'b', 'c' ] });
       
     }},
     

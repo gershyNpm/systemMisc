@@ -58,12 +58,12 @@ export class Pt {
   }
   encode() { return { x: this.x, y: this.y }; }
   
-  public len()                             { return Math.sqrt(this.x * this.x + this.y * this.y); }
-  public dot(pt: { x: number, y: number }) { return this.x * pt.x + this.y * pt.y; }
-  public add(pt: { x: number, y: number }) { return new Pt({ x: this.x + pt.x, y: this.y + pt.y }); }
-  public sub(pt: { x: number, y: number }) { return new Pt({ x: this.x - pt.x, y: this.y - pt.y }); }
-  public mult(mag: number)                 { return new Pt({ x: this.x * mag, y: this.y * mag }); }
-  public norm()                            { return this.mult(1 / this.len()); }
+  public len()                                   { return Math.sqrt(this.x * this.x + this.y * this.y); }
+  public dot(pt: { x: number, y: number })       { return this.x * pt.x + this.y * pt.y; }
+  public add(pt: { x: number, y: number })       { return new Pt({ x: this.x + pt.x, y: this.y + pt.y }); }
+  public sub(pt: { x: number, y: number })       { return new Pt({ x: this.x - pt.x, y: this.y - pt.y }); }
+  public mult(mag: number)                       { return new Pt({ x: this.x * mag, y: this.y * mag }); }
+  public norm(zero = new Pt(), len = this.len()) { return len ? this.mult(1 / len) : zero; }
   
   public getTur(pt: { x: number, y: number }) { return Pt.tur(this, pt); }
   public addTur(turDelta: number)             { return Pt.rotate([ this ], turDelta)[0]; }

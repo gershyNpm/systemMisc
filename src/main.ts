@@ -7,6 +7,7 @@ import gardenGrow from './gardenGrow.ts';
 import runServer from './util/runServer.ts';
 import localServer from './localServer.ts';
 import tracked from './util/tracked.ts';
+import './play.ts'; // Only imported so that runtime validation fails early (e.g. registry class names)
 
 // TODO: Think about something like @gershy/lilac-entry which is like @gershy/entry but specialized
 // for growing / updating / querying / debugging (pulling logs) / raking a garden... ("gardener"?)

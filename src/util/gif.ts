@@ -44,7 +44,7 @@ export default async (inp: GifInp) => {
     for (let frm = 0; frm < frames; frm++) {
       
       const ms = frm * msPerFrame;
-      draw.fresh(() => frame.fn({ draw, ms, sc: ms * 0.001, amt: frm / (frames - 1) }));
+      draw.fresh({}, () => frame.fn({ draw, ms, sc: ms * 0.001, amt: frm / (frames - 1) }));
       encoder.addFrame(ctx);
       
     }
@@ -54,7 +54,7 @@ export default async (inp: GifInp) => {
     for (let frm = 0; true; frm++) {
       
       const ms = frm * msPerFrame;
-      const { finish } = draw.fresh(() => frame.fn({ draw, ms, sc: ms * 0.001 }));
+      const { finish } = draw.fresh({}, () => frame.fn({ draw, ms, sc: ms * 0.001 }));
       encoder.addFrame(ctx);
       if (finish) break;
       
